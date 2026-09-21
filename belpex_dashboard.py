@@ -40,7 +40,11 @@ else:
 ELEXYS_URL = ("https://www.elexys.be/en/insights/quarter-hourly-belpex-day-ahead-spot-be"
               "?from={van}&until={tot}")
 
-STORE = BASISMAP / "belpex_databank.csv"   # lokale YTD-databank
+STORE = BASISMAP / "belpex_databank.csv"   # lokale prijzendatabank
+
+# Belpex noteert pas kwartierprijzen vanaf deze datum; alles daarvoor is
+# uurdata en bestaat niet op de kwartierpagina van Elexys.
+KWARTIER_START = date(2025, 8, 1)
 
 STAPPEN = ["📋 Data & periode", "📊 Grafieken", "🧾 Verbruik & vergoeding", "💾 Export"]
 
@@ -182,16 +186,18 @@ def _fetch_web_tabel(sessie, headers, van: date, tot: date) -> pd.DataFrame:
     return out
 
 
-def fetch_web(van: date, tot: date) -> pd.DataFrame:
+def _fetch_web_periode(van: date, tot: date) -> pd.DataFrame:
     """
     Haalt de kwartierprijzen op via de Excel-exportknop op de Elexys-pagina
     (niet de zichtbare tabel — die toont maar de laatste ~50 kwartieren).
     Draait op jouw machine met jouw IP, dus dit kan lukken waar een server
     faalt. Lukt het niet, dan blijft uploaden altijd werken.
 
-    Let op: de exportknop levert steeds de volledige year-to-date-reeks van
-    Elexys, ongeacht 'van'/'tot' in de query — die worden hier client-side
-    toegepast als filter op het resultaat.
+    Let op: de exportknop levert per opvraging één aaneengesloten reeks van
+    Elexys (voor het lopende jaar is dat de volledige year-to-date-reeks,
+    ongeacht 'van'/'tot' in de query). 'van'/'tot' worden hier daarom ook
+    client-side als filter op het resultaat toegepast. Een bereik over
+    meerdere kalenderjaren wordt door fetch_web() jaar per jaar opgevraagd.
     """
     import re
     import requests
@@ -227,6 +233,78 @@ def fetch_web(van: date, tot: date) -> pd.DataFrame:
     if out.empty:
         raise ValueError(f"Geen data in de export voor de periode {van} – {tot}.")
     return out
+
+
+def jaar_stukken(van: date, tot: date):
+    """Knipt een bereik in stukken die elk binnen één kalenderjaar vallen."""
+    stukken = []
+    for jaar in range(van.year, tot.year + 1):
+        stuk_van, stuk_tot = max(van, date(jaar, 1, 1)), min(tot, date(jaar, 12, 31))
+        if stuk_van <= stuk_tot:
+            stukken.append((stuk_van, stuk_tot))
+    return stukken
+
+
+def fetch_web(van: date, tot: date):
+    """
+    Haalt de kwartierprijzen op voor een bereik dat meerdere kalenderjaren mag
+    beslaan (bv. 2025 + 2026). Elexys geeft zo'n bereik meestal in één export
+    terug; lukt dat niet, dan wordt er alsnog jaar per jaar opgehaald en
+    samengevoegd.
+
+    Geeft (data, problemen) terug: 'problemen' bevat per mislukt stuk een
+    leesbare melding, zodat de geslaagde jaren toch bruikbaar blijven.
+    """
+    if tot < van:
+        raise ValueError("'Tot' ligt voor 'van'.")
+
+    # Vóór KWARTIER_START bestaan er geen kwartierprijzen (Belpex noteerde toen
+    # per uur); de Elexys-pagina antwoordt op zo'n periode met een serverfout.
+    problemen = []
+    if van < KWARTIER_START:
+        if tot < KWARTIER_START:
+            raise ValueError(
+                f"Belpex publiceert pas kwartierprijzen vanaf "
+                f"{KWARTIER_START:%d/%m/%Y}; voor die datum bestaan er enkel uurprijzen.")
+        problemen.append(
+            f"vóór {KWARTIER_START:%d/%m/%Y} bestaan er geen kwartierprijzen — "
+            f"die periode is overgeslagen.")
+        van = KWARTIER_START
+
+    try:
+        data = _fetch_web_periode(van, tot)
+    except Exception as e:
+        frames = []
+        for stuk_van, stuk_tot in jaar_stukken(van, tot):
+            try:
+                frames.append(_fetch_web_periode(stuk_van, stuk_tot))
+            except Exception as jaar_fout:
+                problemen.append(f"{stuk_van.year}: {jaar_fout}")
+        if not frames:
+            raise ValueError("; ".join(problemen) or str(e))
+        data = pd.concat(frames, ignore_index=True)
+
+    data = (data.dropna().drop_duplicates("datetime", keep="last")
+            .sort_values("datetime").reset_index(drop=True))
+
+    # Elexys levert per export maar een beperkt aantal rijen; als het begin van
+    # de gevraagde periode ontbreekt, wordt dat stuk apart nagehaald.
+    for _ in range(12):
+        oudste = data["datetime"].min().date()
+        if oudste <= van:
+            break
+        try:
+            extra = _fetch_web_periode(van, oudste)
+        except Exception as e:
+            problemen.append(f"tot {oudste:%d/%m/%Y} niet volledig opgehaald: {e}")
+            break
+        data = (pd.concat([data, extra], ignore_index=True)
+                .dropna().drop_duplicates("datetime", keep="last")
+                .sort_values("datetime").reset_index(drop=True))
+        if data["datetime"].min().date() >= oudste:
+            break
+
+    return data, problemen
 
 
 def load_store() -> pd.DataFrame:
@@ -356,15 +434,24 @@ if stap == 1:
     with kol1:
         st.markdown("**Optie A — automatisch ophalen (geen token nodig)**")
         vandaag = date.today()
-        fv = st.date_input("Van", value=date(vandaag.year, 1, 1), key="fetch_van")
-        ft = st.date_input("Tot", value=vandaag, key="fetch_tot")
-        st.caption("Haalt de volledige year-to-date kwartierreeks op via Elexys.")
+        fv = st.date_input("Van", value=KWARTIER_START, min_value=KWARTIER_START,
+                           max_value=vandaag, key="fetch_van")
+        ft = st.date_input("Tot", value=vandaag, min_value=KWARTIER_START,
+                           max_value=vandaag, key="fetch_tot")
+        st.caption(f"Meerdere jaren mogen: standaard wordt alles vanaf "
+                   f"{KWARTIER_START:%d/%m/%Y} opgehaald (2025 én 2026) en samengevoegd "
+                   f"in de databank. Eerder bestaan er geen kwartierprijzen, enkel uurprijzen.")
         if st.button("🌐 Ophalen via Elexys", type="primary", width="stretch"):
             try:
-                with st.spinner("Ophalen ..."):
-                    gehaald = fetch_web(fv, ft)
+                jaren = [jv.year for jv, _ in jaar_stukken(fv, ft)]
+                with st.spinner(f"Ophalen {', '.join(str(j) for j in jaren)} ..."):
+                    gehaald, problemen = fetch_web(fv, ft)
                 save_store(gehaald)
-                st.success(f"{len(gehaald):,} kwartieren opgehaald en bewaard.")
+                per_jaar = gehaald["datetime"].dt.year.value_counts().sort_index()
+                detail = " · ".join(f"{j}: {n:,}" for j, n in per_jaar.items())
+                st.success(f"{len(gehaald):,} kwartieren opgehaald en bewaard ({detail}).")
+                for pr in problemen:
+                    st.warning(f"Niet opgehaald — {pr}")
                 st.rerun()
             except Exception as e:
                 st.warning(f"Ophalen lukte niet: {e}")
@@ -434,14 +521,22 @@ if stap == 1:
         st.divider()
         st.markdown("**Periode**")
         lo, hi = raw["datetime"].min().date(), raw["datetime"].max().date()
-        preset = st.radio("Snelkeuze", ["Volledig", "Laatste 30 dagen", "Laatste 90 dagen",
-                                        "Year to date", "Zelf kiezen"], index=3, horizontal=True)
+        jaren = sorted(raw["datetime"].dt.year.unique())
+        keuzes = ["Volledig", "Laatste 30 dagen", "Laatste 90 dagen",
+                  "Year to date", "Per jaar", "Zelf kiezen"]
+        # Bij data uit meerdere jaren is "volledig" de zinnigste standaard;
+        # bij één jaar blijft dat year-to-date.
+        preset = st.radio("Snelkeuze", keuzes,
+                          index=0 if len(jaren) > 1 else 3, horizontal=True)
         if preset == "Laatste 30 dagen":
             d0, d1 = max(lo, hi - pd.Timedelta(days=29).to_pytimedelta()), hi
         elif preset == "Laatste 90 dagen":
             d0, d1 = max(lo, hi - pd.Timedelta(days=89).to_pytimedelta()), hi
         elif preset == "Year to date":
             d0, d1 = max(lo, date(hi.year, 1, 1)), hi
+        elif preset == "Per jaar":
+            jaar = st.selectbox("Jaar", jaren, index=len(jaren) - 1)
+            d0, d1 = max(lo, date(jaar, 1, 1)), min(hi, date(jaar, 12, 31))
         elif preset == "Zelf kiezen":
             picked = st.date_input("Van / tot", value=(lo, hi), min_value=lo, max_value=hi)
             d0, d1 = picked if isinstance(picked, tuple) and len(picked) == 2 else (lo, hi)

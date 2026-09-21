@@ -3,4 +3,5 @@ __pycache__/
 build/
 dist/
 *.spec
-belpex_databank.csv
+# De databank wordt wél meegeleverd: de online (Streamlit Cloud) versie
+# start met een leeg, vluchtig bestandssysteem en kan zo meteen 2025+2026 tonen.
