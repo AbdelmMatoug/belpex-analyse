@@ -453,13 +453,18 @@ if stap == 1:
     with kol1:
         st.markdown("**Optie A — marktprijzen automatisch ophalen**")
         vandaag = date.today()
-        fv = st.date_input("Van", value=KWARTIER_START, min_value=KWARTIER_START,
+        # Standaard het lopende jaar: oudere kwartieren zitten al in de databank
+        # en opnieuw ophalen kost alleen tijd. Verder terug mag nog altijd —
+        # tot KWARTIER_START, want eerder bestaan er geen kwartierprijzen.
+        jaarbegin = max(KWARTIER_START, date(vandaag.year, 1, 1))
+        fv = st.date_input("Van", value=jaarbegin, min_value=KWARTIER_START,
                            max_value=vandaag, key="fetch_van")
         ft = st.date_input("Tot", value=vandaag, min_value=KWARTIER_START,
                            max_value=vandaag, key="fetch_tot")
-        st.caption(f"Meerdere jaren mogen: standaard wordt alles vanaf "
-                   f"{KWARTIER_START:%d/%m/%Y} opgehaald (2025 én 2026) en samengevoegd "
-                   f"in de databank. Eerder bestaan er geen kwartierprijzen, enkel uurprijzen.")
+        st.caption(f"Standaard wordt {vandaag.year} opgehaald en samengevoegd met wat er "
+                   f"al in de databank zit. Zet 'Van' vroeger om verder terug te gaan — "
+                   f"tot {KWARTIER_START:%d/%m/%Y}, want eerder bestaan er geen "
+                   f"kwartierprijzen, enkel uurprijzen.")
         if st.button("⚡ Marktprijzen ophalen", type="primary", width="stretch"):
             try:
                 jaren = [jv.year for jv, _ in jaar_stukken(fv, ft)]
