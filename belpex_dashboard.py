@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-BELPEX Quarter-Hourly Day-Ahead (BE) - Dashboard
-================================================
+Scholt — Belpex kwartierprijzen
+===============================
 Interactieve UI voor de analyse van Belgische kwartierprijzen, opgezet als
 een stap-voor-stap wizard (geen zijbalk): elke instelling staat op de stap
 waar ze nodig is, en de "Volgende"-knop blokkeert zolang de vereiste data
 voor die stap ontbreekt.
+
+Drie stappen: data & periode (inclusief de piek/dal-verhouding), verbruik &
+vergoeding, export. De piek/dal-keuze op stap 1 werkt door in alles wat
+daarna komt — kerncijfers, eenheidsprijs piek/dal en de Excel-werkmap.
 
 Starten:
     pip install streamlit plotly pandas numpy openpyxl xlsxwriter
@@ -23,7 +27,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
@@ -46,7 +49,16 @@ STORE = BASISMAP / "belpex_databank.csv"   # lokale prijzendatabank
 # uurdata en bestaat niet op de kwartierpagina van Elexys.
 KWARTIER_START = date(2025, 8, 1)
 
-STAPPEN = ["📋 Data & periode", "📊 Grafieken", "🧾 Verbruik & vergoeding", "💾 Export"]
+STAPPEN = ["📋 Data & periode", "🧾 Verbruik & vergoeding", "💾 Export"]
+
+# Piek/dal-verhoudingen. De waarden zijn (eerste piekuur, eerste daluur na de
+# piek): (8, 20) betekent piek van 08:00 t.e.m. 19:45. De gekozen verhouding
+# bepaalt alles — de kerncijfers, de eenheidsprijs piek/dal én de werkmap.
+PIEKPROFIELEN = {
+    "Standaard — 08:00 t.e.m. 19:45 (12u)": (8, 20),
+    "Scholt — 07:00 t.e.m. 21:45 (15u)": (7, 22),
+    "Zelf kiezen": None,
+}
 
 EENHEDEN = {"EUR/kWh": 1, "cent/kWh": 100, "EUR/MWh": 1000}
 DECIMALEN = {"EUR/kWh": 4, "cent/kWh": 2, "EUR/MWh": 2}
@@ -55,9 +67,10 @@ DECIMALEN = {"EUR/kWh": 4, "cent/kWh": 2, "EUR/MWh": 2}
 # PAGINA-INSTELLINGEN
 # --------------------------------------------------------------------------
 
-st.set_page_config(page_title="Belpex Analyse", page_icon="⚡", layout="wide")
+st.set_page_config(page_title="Scholt — kwartierprijzen", page_icon="⚡", layout="wide")
 
-BLUE, ORANGE, RED, GREY = "#1f4e79", "#e07b39", "#c0392b", "#7f8c8d"
+# Huisstijl Scholt Energy (scholt.be): rood accent op donkerblauw.
+ROOD, NAVY, DONKER, ZAND, GREY = "#e61d3a", "#030737", "#171b25", "#edeae4", "#7f8c8d"
 
 # Compatibiliteit: Streamlit >= 1.60 gebruikt width="stretch" i.p.v. use_container_width
 try:
@@ -378,6 +391,13 @@ def monthly_table(d: pd.DataFrame, factor: float = 1.0) -> pd.DataFrame:
     return out.round(4)
 
 
+def piek_omschrijving(peak_start: int, peak_end: int, weekdays_only: bool) -> str:
+    """Leesbare omschrijving, bv. 'weekdagen 07:00 t.e.m. 21:45 (15u)'."""
+    dagen = "weekdagen" if weekdays_only else "elke dag"
+    return (f"{dagen} {peak_start:02d}:00 t.e.m. {peak_end - 1:02d}:45 "
+            f"({peak_end - peak_start}u)")
+
+
 def style_fig(fig, height=430, title=None):
     fig.update_layout(
         height=height, title=title, margin=dict(l=10, r=10, t=50, b=10),
@@ -404,11 +424,10 @@ raw = cache.get("raw", pd.DataFrame(columns=["datetime", "price"]))
 source = cache.get("source", "")
 d0 = cache.get("d0")
 d1 = cache.get("d1")
-peak_start, peak_end = cache.get("peak_uren", (8, 20))
+piekprofiel = cache.get("piekprofiel", list(PIEKPROFIELEN)[0])
+peak_start, peak_end = cache.get("peak_uren", PIEKPROFIELEN[list(PIEKPROFIELEN)[0]])
 weekdays_only = cache.get("weekdays_only", True)
 eenheid = cache.get("eenheid", "EUR/kWh")
-show_raw_line = cache.get("show_raw_line", True)
-roll = cache.get("roll", 7)
 vergoeding_in = cache.get("vergoeding", 0.0)
 geen_vergoeding = cache.get("geen_vergoeding", False)
 vbr_df = cache.get("vbr_df")            # al genormaliseerde verbruik-DataFrame, of None
@@ -422,7 +441,7 @@ st.session_state.setdefault("stap", 1)
 st.session_state["stap"] = max(1, min(len(STAPPEN), st.session_state["stap"]))
 stap = st.session_state["stap"]
 
-st.title("⚡ Belpex kwartierprijzen — analyse")
+st.title("⚡ Scholt — Belpex kwartierprijzen")
 
 # --------------------------------------------------------------------------
 # STAP 1 — DATA & PERIODE
@@ -432,7 +451,7 @@ if stap == 1:
 
     kol1, kol2 = st.columns(2)
     with kol1:
-        st.markdown("**Optie A — automatisch ophalen (geen token nodig)**")
+        st.markdown("**Optie A — marktprijzen automatisch ophalen**")
         vandaag = date.today()
         fv = st.date_input("Van", value=KWARTIER_START, min_value=KWARTIER_START,
                            max_value=vandaag, key="fetch_van")
@@ -441,7 +460,7 @@ if stap == 1:
         st.caption(f"Meerdere jaren mogen: standaard wordt alles vanaf "
                    f"{KWARTIER_START:%d/%m/%Y} opgehaald (2025 én 2026) en samengevoegd "
                    f"in de databank. Eerder bestaan er geen kwartierprijzen, enkel uurprijzen.")
-        if st.button("🌐 Ophalen via Elexys", type="primary", width="stretch"):
+        if st.button("⚡ Marktprijzen ophalen", type="primary", width="stretch"):
             try:
                 jaren = [jv.year for jv, _ in jaar_stukken(fv, ft)]
                 with st.spinner(f"Ophalen {', '.join(str(j) for j in jaren)} ..."):
@@ -455,10 +474,10 @@ if stap == 1:
                 st.rerun()
             except Exception as e:
                 st.warning(f"Ophalen lukte niet: {e}")
-                st.caption("Download de tabel dan handmatig via Elexys en upload ze rechts.")
+                st.caption("Download de prijzen dan handmatig en upload ze rechts.")
     with kol2:
-        st.markdown("**Optie B — zelf een bestand uploaden**")
-        ups = st.file_uploader("Elexys-export(s) — CSV of Excel",
+        st.markdown("**Optie B — zelf een prijsbestand uploaden**")
+        ups = st.file_uploader("Prijsbestand(en) — CSV of Excel",
                                type=["csv", "xlsx", "xls", "txt"],
                                accept_multiple_files=True, key="prijs_upload")
         with st.expander("Kolommen (enkel bij detectieproblemen)"):
@@ -479,7 +498,7 @@ if stap == 1:
             if frames:
                 parsed = pd.concat(frames, ignore_index=True).drop_duplicates("datetime")
                 st.success(f"{len(parsed):,} kwartieren ingelezen uit {len(frames)} bestand(en)")
-                if st.button("➕ Toevoegen aan databank", width="stretch"):
+                if st.button("➕ Toevoegen aan prijzendatabank", width="stretch"):
                     save_store(parsed)
                     st.success("Toegevoegd.")
                     st.rerun()
@@ -544,6 +563,38 @@ if stap == 1:
             d0, d1 = lo, hi
         st.caption(f"{d0:%d/%m/%Y} → {d1:%d/%m/%Y}")
 
+        st.divider()
+        st.markdown("**Piek / dal**")
+        # Deze keuze staat bewust op stap 1, vóór elke berekening: ze bepaalt de
+        # kerncijfers, de eenheidsprijs piek/dal én de Excel-werkmap, dus ze moet
+        # vastliggen voor er ook maar iets gerekend wordt.
+        st.session_state.setdefault("w_piekprofiel", piekprofiel)
+        st.session_state.setdefault("w_peak_uren", (peak_start, peak_end))
+        st.session_state.setdefault("w_weekdays_only", weekdays_only)
+        st.session_state.setdefault("w_eenheid", eenheid)
+
+        pk1, pk2 = st.columns([3, 2])
+        with pk1:
+            piekprofiel = st.radio("Verhouding", list(PIEKPROFIELEN), key="w_piekprofiel")
+            vaste_uren = PIEKPROFIELEN[piekprofiel]
+            if vaste_uren is None:
+                peak_start, peak_end = st.slider("Piekuren", 0, 24, key="w_peak_uren")
+            else:
+                peak_start, peak_end = vaste_uren
+            weekdays_only = st.checkbox("Piek enkel op werkdagen (ma-vr)",
+                                        key="w_weekdays_only")
+        with pk2:
+            eenheid = st.radio("Eenheid (prijs)", list(EENHEDEN), key="w_eenheid")
+        st.caption(f"Piek = {piek_omschrijving(peak_start, peak_end, weekdays_only)}  ·  "
+                   f"dal = al de rest.")
+
+        cache["piekprofiel"] = piekprofiel
+        cache["peak_uren"] = (peak_start, peak_end)
+        cache["weekdays_only"] = weekdays_only
+        cache["eenheid"] = eenheid
+        factor = EENHEDEN[eenheid]
+        dec = DECIMALEN[eenheid]
+
     cache["raw"], cache["source"] = raw, source
     cache["d0"], cache["d1"] = d0, d1
 
@@ -574,8 +625,9 @@ if data_geladen:
         d_wb = d_wb.merge(vbr_df, on="datetime", how="left")
         d_wb["verbruik"] = d_wb["verbruik"].fillna(0.0)
 
-    piek_vast = ((d_wb["datetime"].dt.dayofweek < 5) &
-                (d_wb["hour"] >= 8) & (d_wb["hour"] < 20))
+    piek_vast = (d_wb["hour"] >= peak_start) & (d_wb["hour"] < peak_end)
+    if weekdays_only:
+        piek_vast &= d_wb["datetime"].dt.dayofweek < 5
 
     if heeft_verbruik:
         vb = d_wb.dropna(subset=["verbruik"])
@@ -600,9 +652,9 @@ if data_geladen:
 blokkade = None
 if stap == 1 and not data_geladen:
     blokkade = "Laad eerst prijsdata (en een geldige periode) voor je verder kan."
-elif stap == 3 and not heeft_verbruik:
+elif stap == 2 and not heeft_verbruik:
     blokkade = "Upload je verbruik hieronder voor je verder kan."
-elif stap == 3 and not vergoeding_bevestigd:
+elif stap == 2 and not vergoeding_bevestigd:
     blokkade = "Vul je vergoeding in, of vink 'geen vergoeding' aan, voor je verder kan."
 
 st.divider()
@@ -634,8 +686,9 @@ if not data_geladen:
 
 if stap > 1:
     st.caption(f"Bron: {source}  ·  {d['datetime'].min():%d/%m/%Y} t/m {d['datetime'].max():%d/%m/%Y}"
-              f"  ·  {len(d):,} kwartieren  ·  peak {peak_start:02d}:00–{peak_end:02d}:00"
-              f"{' (ma-vr)' if weekdays_only else ''}  ·  eenheid {eenheid}")
+              f"  ·  {len(d):,} kwartieren"
+              f"  ·  piek {piek_omschrijving(peak_start, peak_end, weekdays_only)}"
+              f"  ·  eenheid {eenheid}")
 
     p = d["price"]
     peak_avg = d.loc[d["is_peak"], "price"].mean()
@@ -654,176 +707,16 @@ if stap > 1:
     st.divider()
 
 # ============================================================================
-# STAP 2 — GRAFIEKEN
+# ============================================================================
+# STAP 2 — VERBRUIK & VERGOEDING
 # ============================================================================
 if stap == 2:
-    with st.expander("⚙️ Instellingen (piekuren, eenheid, weergave)", expanded=False):
-        st.session_state.setdefault("w_peak_uren", (peak_start, peak_end))
-        st.session_state.setdefault("w_weekdays_only", weekdays_only)
-        st.session_state.setdefault("w_eenheid", eenheid)
-        st.session_state.setdefault("w_show_raw_line", show_raw_line)
-        st.session_state.setdefault("w_roll", roll)
-
-        i1, i2 = st.columns(2)
-        with i1:
-            peak_start, peak_end = st.slider("Piekuren", 0, 24, key="w_peak_uren")
-            weekdays_only = st.checkbox("Piek enkel op werkdagen (ma-vr)", key="w_weekdays_only")
-        with i2:
-            eenheid = st.radio("Eenheid (prijs)", list(EENHEDEN), key="w_eenheid", horizontal=True)
-            show_raw_line = st.checkbox("Kwartierprijzen tonen in tijdreeks", key="w_show_raw_line")
-            roll = st.slider("Voortschrijdend gemiddelde (dagen)", 1, 60, key="w_roll")
-        cache["peak_uren"] = (peak_start, peak_end)
-        cache["weekdays_only"] = weekdays_only
-        cache["eenheid"] = eenheid
-        cache["show_raw_line"] = show_raw_line
-        cache["roll"] = roll
-        factor = EENHEDEN[eenheid]
-        dec = DECIMALEN[eenheid]
-        d = enrich(raw[(raw["datetime"] >= pd.Timestamp(d0)) &
-                       (raw["datetime"] < pd.Timestamp(d1) + pd.Timedelta(days=1))],
-                   peak_start, peak_end, weekdays_only)
-        d["price"] = d["price"] / 1000
-        d["price_disp"] = d["price"] * factor
-        p = d["price"]
-
-    weergave = st.radio("Weergave", ["📈 Tijdreeks", "🕐 Profielen", "🔥 Heatmaps",
-                                     "📊 Verdeling", "📅 Maandoverzicht"],
-                        horizontal=True, key="grafiek_weergave")
-    st.write("")
-
-    if weergave == "📈 Tijdreeks":
-        dser = d.groupby("date")["price_disp"].mean()
-        dser.index = pd.to_datetime(dser.index)
-        fig = go.Figure()
-        if show_raw_line:
-            fig.add_trace(go.Scatter(x=d["datetime"], y=d["price_disp"], name="Kwartierprijs",
-                                     line=dict(color=BLUE, width=0.5), opacity=0.45))
-        fig.add_trace(go.Scatter(x=dser.index, y=dser.rolling(roll, min_periods=1).mean(),
-                                 name=f"{roll}-daags gemiddelde",
-                                 line=dict(color=ORANGE, width=3)))
-        fig.add_hline(y=0, line_color="black", line_width=1)
-        fig.update_yaxes(title=eenheid)
-        st.plotly_chart(style_fig(fig, 480, "Prijsverloop"), **FULL)
-
-        dd = d.groupby("date")["price_disp"].agg(["min", "max", "mean"])
-        dd.index = pd.to_datetime(dd.index)
-        f2 = go.Figure()
-        f2.add_trace(go.Scatter(x=dd.index, y=dd["max"], name="Dagmaximum",
-                                line=dict(width=0), showlegend=False))
-        f2.add_trace(go.Scatter(x=dd.index, y=dd["min"], name="Dagelijkse min-max band",
-                                fill="tonexty", line=dict(width=0),
-                                fillcolor="rgba(31,78,121,0.22)"))
-        f2.add_trace(go.Scatter(x=dd.index, y=dd["mean"], name="Dagbaseload",
-                                line=dict(color=ORANGE, width=2)))
-        f2.add_hline(y=0, line_color="black", line_width=1)
-        f2.update_yaxes(title=eenheid)
-        st.plotly_chart(style_fig(f2, 400, "Intraday volatiliteit"), **FULL)
-
-    elif weergave == "🕐 Profielen":
-        left, right = st.columns([3, 2])
-        with left:
-            fig = go.Figure()
-            for q in sorted(d["quarter_label"].unique()):
-                s = d[d["quarter_label"] == q].groupby("qh")["price_disp"].mean()
-                fig.add_trace(go.Scatter(x=s.index, y=s.values, name=q, line=dict(width=2)))
-            ov = d.groupby("qh")["price_disp"].mean()
-            fig.add_trace(go.Scatter(x=ov.index, y=ov.values, name="Volledige periode",
-                                     line=dict(color="black", width=3.5)))
-            fig.add_vrect(x0=peak_start * 4, x1=peak_end * 4,
-                          fillcolor=ORANGE, opacity=0.10, line_width=0)
-            fig.add_hline(y=0, line_color="black", line_width=1)
-            fig.update_xaxes(tickvals=list(range(0, 96, 8)),
-                             ticktext=[f"{h:02d}:00" for h in range(0, 24, 2)])
-            fig.update_yaxes(title=eenheid)
-            st.plotly_chart(style_fig(fig, 460, "Gemiddeld intraday kwartierprofiel"),
-                            **FULL)
-        with right:
-            wk = d.groupby(["dayofweek", "dayname"])["price_disp"].mean().reset_index()
-            nl = {"Monday": "Ma", "Tuesday": "Di", "Wednesday": "Wo", "Thursday": "Do",
-                  "Friday": "Vr", "Saturday": "Za", "Sunday": "Zo"}
-            wk["dag"] = wk["dayname"].map(nl)
-            fig = px.bar(wk, x="dag", y="price_disp", color_discrete_sequence=[BLUE],
-                        labels={"price_disp": eenheid})
-            fig.add_hline(y=p.mean() * factor, line_color=ORANGE, line_dash="dash")
-            st.plotly_chart(style_fig(fig, 460, "Gemiddelde per weekdag"),
-                            **FULL)
-
-        neg_h = (d.groupby("hour")["is_negative"].mean() * 100).reset_index()
-        fig = px.bar(neg_h, x="hour", y="is_negative", color_discrete_sequence=[RED],
-                     labels={"is_negative": "% negatief", "hour": "Uur"})
-        st.plotly_chart(style_fig(fig, 340, "Aandeel negatieve kwartieren per uur"),
-                        **FULL)
-
-    elif weergave == "🔥 Heatmaps":
-        piv = d.pivot_table(index="hour", columns="month_label", values="price_disp", aggfunc="mean")
-        fig = px.imshow(piv, color_continuous_scale="RdYlGn_r", aspect="auto", origin="lower",
-                        labels=dict(color=eenheid, x="Maand", y="Uur"))
-        st.plotly_chart(style_fig(fig, 520, "Gemiddelde prijs per uur en maand"),
-                        **FULL)
-
-        order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-        piv2 = d.pivot_table(index="dayname", columns="hour", values="price_disp",
-                             aggfunc="mean").reindex(order)
-        piv2.index = ["Ma", "Di", "Wo", "Do", "Vr", "Za", "Zo"]
-        fig = px.imshow(piv2, color_continuous_scale="RdYlGn_r", aspect="auto",
-                        labels=dict(color=eenheid, x="Uur", y=""))
-        st.plotly_chart(style_fig(fig, 380, "Gemiddelde prijs per weekdag en uur"),
-                        **FULL)
-
-    elif weergave == "📊 Verdeling":
-        a, b = st.columns(2)
-        with a:
-            srt = np.sort(d["price_disp"].values)[::-1]
-            pct = np.arange(1, len(srt) + 1) / len(srt) * 100
-            fig = go.Figure(go.Scatter(x=pct, y=srt, line=dict(color=BLUE, width=2),
-                                       fill="tozeroy", fillcolor="rgba(31,78,121,0.18)"))
-            fig.add_hline(y=p.mean() * factor, line_color=ORANGE, line_dash="dash",
-                          annotation_text=f"Baseload {p.mean()*factor:.{dec}f}")
-            fig.add_hline(y=0, line_color="black", line_width=1)
-            fig.update_xaxes(title="% kwartieren met hogere prijs")
-            fig.update_yaxes(title=eenheid)
-            st.plotly_chart(style_fig(fig, 420, "Price duration curve"), **FULL)
-        with b:
-            clip = d["price_disp"].clip(*d["price_disp"].quantile([0.002, 0.998]))
-            fig = px.histogram(clip, nbins=80, color_discrete_sequence=[BLUE],
-                               labels={"value": eenheid})
-            fig.add_vline(x=p.mean() * factor, line_color=ORANGE, line_dash="dash")
-            fig.add_vline(x=0, line_color=RED)
-            fig.update_layout(showlegend=False)
-            st.plotly_chart(style_fig(fig, 420, "Verdeling kwartierprijzen"),
-                            **FULL)
-
-        fig = px.box(d, x="month_label", y="price_disp", points=False,
-                     color_discrete_sequence=[BLUE], labels={"price_disp": eenheid})
-        fig.add_hline(y=0, line_color="black", line_width=1)
-        st.plotly_chart(style_fig(fig, 420, "Spreiding per maand"), **FULL)
-
-    else:  # 📅 Maandoverzicht
-        mt = monthly_table(d, factor)
-        fig = go.Figure()
-        for col, colr in [("Baseload", BLUE), ("Peak", ORANGE), ("Off-peak", GREY)]:
-            fig.add_trace(go.Bar(x=mt.index, y=mt[col], name=col, marker_color=colr))
-        fig.update_layout(barmode="group")
-        fig.add_hline(y=0, line_color="black", line_width=1)
-        fig.update_yaxes(title=eenheid)
-        st.plotly_chart(style_fig(fig, 420, "Baseload / peak / off-peak per maand"),
-                        **FULL)
-
-        st.dataframe(
-            mt.style.format("{:.4f}").background_gradient(subset=["Baseload", "Peak", "Off-peak"],
-                                                          cmap="RdYlGn_r"),
-            **FULL)
-
-# ============================================================================
-# STAP 3 — VERBRUIK & VERGOEDING
-# ============================================================================
-elif stap == 3:
-    st.markdown("""
+    st.markdown(f"""
 Upload je kwartierverbruik en vul je leveringsvergoeding in — de eenheidsprijs
 (totaal, piek, dal) wordt dan meteen berekend.
 
-**Piek** = weekdagen 08:00 t.e.m. 19:45 · **Dal** = weekdagen 20:00 t.e.m. 07:45 en
-alle weekends.
+**Piek** = {piek_omschrijving(peak_start, peak_end, weekdays_only)} · **Dal** = al de rest.
+Pas je de verhouding aan op stap 1, dan volgen deze cijfers en de werkmap mee.
 Eenheidsprijs = totale kost / totaal verbruik (verbruiksgewogen). Kost per kwartier
 = (prijs + vergoeding) × verbruik.
 """)
@@ -895,25 +788,26 @@ Eenheidsprijs = totale kost / totaal verbruik (verbruiksgewogen). Kost per kwart
             fig = go.Figure(go.Bar(
                 x=["Totaal", "Piek", "Dal"],
                 y=[(v * factor if v is not None else 0) for v in (ep_totaal, ep_piek, ep_dal)],
-                marker_color=[BLUE, ORANGE, GREY]))
+                marker_color=[NAVY, ROOD, GREY]))
             fig.update_yaxes(title=eenheid)
             st.plotly_chart(style_fig(fig, 380, "Eenheidsprijs per periode"), **FULL)
         with g2:
             fig = go.Figure(go.Pie(labels=["Piek", "Dal"], values=[kost_piek, kost_dal],
-                                   hole=0.5, marker_colors=[ORANGE, GREY]))
+                                   hole=0.5, marker_colors=[ROOD, GREY]))
             st.plotly_chart(style_fig(fig, 380, "Aandeel kost piek vs dal (EUR)"), **FULL)
 
 # ============================================================================
-# STAP 4 — EXPORT
+# STAP 3 — EXPORT
 # ============================================================================
 else:
     st.subheader("Eenheidsprijs-werkmap")
     st.caption("Excel met levende formules — prijs, vergoeding en verbruik staan al ingevuld "
               "op het blad 'Kwartierdata'; 'Overzicht' herrekent zichzelf.")
     fname = f"belpex_eenheidsprijs_{d0:%Y%m%d}_{d1:%Y%m%d}.xlsx"
-    if st.button("📗 Excel-werkmap aanmaken", type="primary", width="stretch"):
+    if st.button("📗 Scholt-werkmap aanmaken", type="primary", width="stretch"):
         with st.spinner("Werkmap bouwen ..."):
-            st.session_state["wb"] = build_workbook(d_wb)
+            st.session_state["wb"] = build_workbook(
+                d_wb, peak_start, peak_end, weekdays_only)
             st.session_state["wb_name"] = fname
 
     if st.session_state.get("wb"):

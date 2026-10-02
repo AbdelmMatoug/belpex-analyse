@@ -1,0 +1,6 @@
+# Huisstijl Scholt Energy (scholt.be): rood accent op donkerblauw.
+[theme]
+primaryColor = "#e61d3a"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#edeae4"
+textColor = "#171b25"

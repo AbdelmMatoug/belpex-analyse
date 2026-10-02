@@ -16,9 +16,9 @@ Twee bladen:
                 Kwartierdata verwijzen, dus het blad rekent zichzelf zodra er
                 verbruik in kolom F staat.
 
-Piek = weekdagen 08:00 t.e.m. 19:45 · Dal = weekdagen 20:00 t.e.m. 07:45 en
-alle weekends. Die definitie ligt vast in de werkmap, los van de piekuren
-die in de dashboard-sidebar gekozen zijn.
+De piek/dal-verhouding komt uit het dashboard (stap 1) en wordt hier
+doorgegeven, zodat de werkmap exact dezelfde splitsing gebruikt als de
+cijfers op het scherm. Standaard is dat weekdagen 08:00 t.e.m. 19:45.
 """
 
 from __future__ import annotations
@@ -32,7 +32,8 @@ from openpyxl.utils import get_column_letter
 
 PIEK, DAL = "Piek", "Dal"
 
-BLAUW = "1F4E79"
+BLAUW = "030737"          # Scholt-navy, voor de koppen
+ROOD = "E61D3A"           # Scholt-rood, voor de titels
 GEEL = "FFF2CC"
 GRIJS = "F2F2F2"
 
@@ -49,9 +50,23 @@ KWH = '#,##0.000'
 DTM = "dd/mm/yyyy hh:mm"
 
 
-def _is_piek(dt: pd.Series) -> pd.Series:
-    """Weekdag tussen 08:00 en 20:00 (20:00 zelf valt al in het dal)."""
-    return (dt.dt.dayofweek < 5) & (dt.dt.hour >= 8) & (dt.dt.hour < 20)
+def _is_piek(dt: pd.Series, peak_start: int = 8, peak_end: int = 20,
+             weekdays_only: bool = True) -> pd.Series:
+    """
+    Piek volgens de in het dashboard gekozen verhouding: de uren van
+    peak_start tot peak_end (peak_end zelf valt al in het dal), eventueel
+    beperkt tot weekdagen.
+    """
+    piek = (dt.dt.hour >= peak_start) & (dt.dt.hour < peak_end)
+    if weekdays_only:
+        piek &= dt.dt.dayofweek < 5
+    return piek
+
+
+def _piek_omschrijving(peak_start: int, peak_end: int, weekdays_only: bool) -> str:
+    dagen = "weekdagen" if weekdays_only else "elke dag"
+    return (f"{dagen} {peak_start:02d}:00-{peak_end - 1:02d}:45 "
+            f"({peak_end - peak_start}u)")
 
 
 def _kopregel(ws, koppen, breedtes, rij=1, hoogte=30):
@@ -65,7 +80,8 @@ def _kopregel(ws, koppen, breedtes, rij=1, hoogte=30):
     ws.row_dimensions[rij].height = hoogte
 
 
-def _blad_kwartierdata(wb: Workbook, d: pd.DataFrame) -> int:
+def _blad_kwartierdata(wb: Workbook, d: pd.DataFrame, peak_start: int,
+                       peak_end: int, weekdays_only: bool) -> int:
     """Schrijft de kwartierdata en geeft het aantal datarijen terug."""
     ws = wb.create_sheet("Kwartierdata")
     _kopregel(
@@ -77,7 +93,7 @@ def _blad_kwartierdata(wb: Workbook, d: pd.DataFrame) -> int:
 
     dt = pd.to_datetime(d["datetime"])
     maand = dt.dt.strftime("%Y-%m")
-    periode = _is_piek(dt).map({True: PIEK, False: DAL})
+    periode = _is_piek(dt, peak_start, peak_end, weekdays_only).map({True: PIEK, False: DAL})
     prijs = pd.to_numeric(d["price"], errors="coerce")
     vbr = (pd.to_numeric(d["verbruik"], errors="coerce")
            if "verbruik" in d.columns else pd.Series([None] * len(d), index=d.index))
@@ -106,7 +122,7 @@ def _blad_kwartierdata(wb: Workbook, d: pd.DataFrame) -> int:
     return len(d)
 
 
-def _blad_overzicht(wb: Workbook, maanden: list[str], n: int) -> None:
+def _blad_overzicht(wb: Workbook, maanden: list[str], n: int, piek_tekst: str) -> None:
     ws = wb.create_sheet("Overzicht", 0)
     laatste = n + 1                       # laatste datarij in Kwartierdata
     K = "Kwartierdata!"
@@ -117,11 +133,11 @@ def _blad_overzicht(wb: Workbook, maanden: list[str], n: int) -> None:
     kost_bereik = K + "$G$2:$G$" + str(laatste)
 
     ws["A1"] = "Eenheidsprijs per maand"
-    ws["A1"].font = Font(bold=True, size=14, color=BLAUW)
+    ws["A1"].font = Font(bold=True, size=14, color=ROOD)
     ws["A2"] = ("Plak je kwartierverbruiken in kolom F en je leveringsvergoeding in "
                 "kolom E van het blad 'Kwartierdata'. De cijfers hieronder rekenen zichzelf.")
     ws["A2"].font = Font(italic=True, size=9, color="7F8C8D")
-    ws["A3"] = ("Piek = weekdagen 08:00-19:45 · Dal = weekdagen 20:00-07:45 en weekends. "
+    ws["A3"] = (f"Piek = {piek_tekst} · Dal = al de rest. "
                 "Eenheidsprijs = totale kost / totaal verbruik, inclusief vergoeding.")
     ws["A3"].font = Font(italic=True, size=9, color="7F8C8D")
 
@@ -192,7 +208,8 @@ def _blad_overzicht(wb: Workbook, maanden: list[str], n: int) -> None:
     ws.freeze_panes = "A{0}".format(kop + 1)
 
 
-def build_workbook(d: pd.DataFrame) -> bytes:
+def build_workbook(d: pd.DataFrame, peak_start: int = 8, peak_end: int = 20,
+                   weekdays_only: bool = True) -> bytes:
     """
     Bouwt de werkmap voor de eenheidsprijsberekening en geeft ze terug als
     bytes, klaar voor st.download_button.
@@ -201,6 +218,10 @@ def build_workbook(d: pd.DataFrame) -> bytes:
     Bevat de DataFrame ook een kolom 'verbruik' en/of 'vergoeding', dan worden
     die gebruikt om kolom F resp. E van 'Kwartierdata' meteen voor te vullen
     i.p.v. leeg te laten.
+
+    peak_start/peak_end/weekdays_only bepalen de piek/dal-splitsing en komen
+    uit het dashboard, zodat de werkmap dezelfde verhouding hanteert als het
+    scherm.
     """
     if d is None or d.empty:
         raise ValueError("Geen data om in de werkmap te zetten.")
@@ -219,7 +240,9 @@ def build_workbook(d: pd.DataFrame) -> bytes:
 
     wb = Workbook()
     wb.remove(wb.active)
-    _blad_overzicht(wb, maanden, _blad_kwartierdata(wb, d))
+    rijen = _blad_kwartierdata(wb, d, peak_start, peak_end, weekdays_only)
+    _blad_overzicht(wb, maanden, rijen,
+                    _piek_omschrijving(peak_start, peak_end, weekdays_only))
     wb.active = 0
     # openpyxl schrijft formules zonder gecachet resultaat; zonder deze vlag
     # tonen sommige viewers (en soms Excel zelf) de eenheidsprijs-kolommen
