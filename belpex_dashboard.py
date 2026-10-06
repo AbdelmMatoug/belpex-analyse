@@ -55,8 +55,8 @@ STAPPEN = ["📋 Data & periode", "🧾 Verbruik & vergoeding", "💾 Export"]
 # piek): (8, 20) betekent piek van 08:00 t.e.m. 19:45. De gekozen verhouding
 # bepaalt alles — de kerncijfers, de eenheidsprijs piek/dal én de werkmap.
 PIEKPROFIELEN = {
-    "Standaard — 08:00 t.e.m. 19:45 (12u)": (8, 20),
-    "Scholt — 07:00 t.e.m. 21:45 (15u)": (7, 22),
+    "Standaard — 07:00 t.e.m. 21:45 (15u)": (7, 22),
+    "Scholt — 08:00 t.e.m. 19:45 (12u)": (8, 20),
     "Zelf kiezen": None,
 }
 
@@ -428,8 +428,11 @@ piekprofiel = cache.get("piekprofiel", list(PIEKPROFIELEN)[0])
 peak_start, peak_end = cache.get("peak_uren", PIEKPROFIELEN[list(PIEKPROFIELEN)[0]])
 weekdays_only = cache.get("weekdays_only", True)
 eenheid = cache.get("eenheid", "EUR/kWh")
-vergoeding_in = cache.get("vergoeding", 0.0)
-geen_vergoeding = cache.get("geen_vergoeding", False)
+# De vergoeding-widgets staan pas op stap 2, ná de Vorige/Volgende-knoppen.
+# Lees hun waarde daarom rechtstreeks uit session_state (die is bij een klik al
+# bijgewerkt), anders loopt de blokkade één rerun achter op het vinkje.
+vergoeding_in = st.session_state.get("vergoeding_input", cache.get("vergoeding", 0.0))
+geen_vergoeding = st.session_state.get("w_geen_vergoeding", cache.get("geen_vergoeding", False))
 vbr_df = cache.get("vbr_df")            # al genormaliseerde verbruik-DataFrame, of None
 vbr_naam = cache.get("vbr_naam")
 vbr_melding = cache.get("vbr_melding")  # (niveau, tekst) van de laatste upload-poging
@@ -625,7 +628,7 @@ ep_totaal = ep_piek = ep_dal = kost_piek = kost_dal = None
 piek_vast = None
 if data_geladen:
     d_wb = d.copy()
-    d_wb["vergoeding"] = vergoeding_in
+    d_wb["vergoeding"] = 0.0 if geen_vergoeding else vergoeding_in
     if heeft_verbruik:
         d_wb = d_wb.merge(vbr_df, on="datetime", how="left")
         d_wb["verbruik"] = d_wb["verbruik"].fillna(0.0)
