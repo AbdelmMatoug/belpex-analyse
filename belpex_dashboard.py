@@ -49,7 +49,7 @@ STORE = BASISMAP / "belpex_databank.csv"   # lokale prijzendatabank
 # uurdata en bestaat niet op de kwartierpagina van Elexys.
 KWARTIER_START = date(2025, 8, 1)
 
-STAPPEN = ["📋 Data & periode", "🧾 Verbruik & vergoeding", "💾 Export"]
+STAPPEN = ["Data & periode", "Verbruik & vergoeding", "Export"]
 
 # Piek/dal-verhoudingen. De waarden zijn (eerste piekuur, eerste daluur na de
 # piek): (8, 20) betekent piek van 08:00 t.e.m. 19:45. De gekozen verhouding
@@ -67,10 +67,32 @@ DECIMALEN = {"EUR/kWh": 4, "cent/kWh": 2, "EUR/MWh": 2}
 # PAGINA-INSTELLINGEN
 # --------------------------------------------------------------------------
 
-st.set_page_config(page_title="Scholt — kwartierprijzen", page_icon="⚡", layout="wide")
+st.set_page_config(page_title="Scholt — kwartierprijzen", page_icon=":material/bolt:",
+                   layout="wide")
+
+# Twee tabbladen bovenaan: de rekentool (deze file) en de handleiding.
+# De rekentool blijft gewone code op moduleniveau; enkel voor de handleiding
+# wordt een andere pagina uitgevoerd, waarna dit script stopt.
+def _rekentool():
+    pass
+
+
+_pagina = st.navigation(
+    [st.Page(_rekentool, title="Rekentool", icon=":material/calculate:", default=True),
+     st.Page("handleiding.py", title="Handleiding", icon=":material/menu_book:")],
+    position="top")
+if _pagina.title == "Handleiding":
+    _pagina.run()
+    st.stop()
 
 # Huisstijl Scholt Energy (scholt.be): rood accent op donkerblauw.
 ROOD, NAVY, DONKER, ZAND, GREY = "#e61d3a", "#030737", "#171b25", "#edeae4", "#7f8c8d"
+ZAND_RAND = "#c9c3b8"   # rand rond zandkleurige vlakken in grafieken
+
+
+def nl(x: float, dec: int = 0) -> str:
+    """Belgische notatie: 140.537 en 0,1930 (niet 140,537 en 0.1930)."""
+    return f"{x:,.{dec}f}".replace(",", "\0").replace(".", ",").replace("\0", ".")
 
 # Compatibiliteit: Streamlit >= 1.60 gebruikt width="stretch" i.p.v. use_container_width
 try:
@@ -81,11 +103,84 @@ except Exception:
 
 st.markdown("""
 <style>
-  .block-container {padding-top: 2rem; max-width: 1100px;}
-  [data-testid="stMetricValue"] {font-size: 1.6rem;}
-  h1 {font-size: 1.9rem !important;}
+  /* Werkblad-dichtheid: één kolom van 1100px, 8px-raster, rood = actie of piek. */
+  :root {
+    --inkt: #171b25;        /* tekst */
+    --inkt-zacht: #5b6170;  /* labels */
+    --inkt-stil: #8a8f9b;   /* metadata */
+    --zand: #edeae4;        /* vlakken, dal */
+    --lijn: rgba(23,27,37,.10);
+    --piek: #e61d3a;        /* Scholt-rood: piek én primaire actie */
+    --nacht: #030737;       /* Scholt-donkerblauw */
+    --papier: #ffffff;      /* kaartvlak */
+  }
+  html, body {-webkit-font-smoothing: antialiased;}
+  .block-container {padding-top: 1.5rem; max-width: 1100px;}
+  h1 {font-size: 1.75rem !important; letter-spacing: -0.01em; text-wrap: balance;}
+  [data-testid="stMetricValue"] {font-size: 1.35rem; font-variant-numeric: tabular-nums;}
+  [data-testid="stMetricLabel"] p {color: var(--inkt-zacht);}
+
+  /* Stappenbalk: drie benoemde stappen, de actieve in rood. */
+  .stappen {display: flex; gap: 8px; margin: 4px 0 24px;}
+  .stappen div {flex: 1; padding: 8px 0 0; border-top: 3px solid var(--zand);
+                color: var(--inkt-stil); font-size: .85rem; font-weight: 500;}
+  .stappen div b {display: block; font-size: .7rem; font-weight: 600;
+                  letter-spacing: .06em; text-transform: uppercase;}
+  .stappen .klaar {border-top-color: var(--nacht); color: var(--inkt-zacht);}
+  .stappen .nu {border-top-color: var(--piek); color: var(--inkt);}
+
+  /* Dagbalk: 96 kwartieren van één dag, piek in rood. */
+  .dagbalk {display: grid; grid-template-columns: repeat(96, 1fr); gap: 1px;
+            height: 22px; border-radius: 4px; overflow: hidden; margin-top: 4px;}
+  .dagbalk span {background: var(--zand);}
+  .dagbalk span.p {background: var(--piek);}
+  .dagbalk-uren {display: flex; justify-content: space-between; margin-top: 4px;
+                 font-size: .72rem; color: var(--inkt-stil); font-variant-numeric: tabular-nums;}
+  .dagbalk-uitleg {font-size: .8rem; color: var(--inkt-zacht); margin-top: 6px;}
+  .dagbalk-uitleg i {display: inline-block; width: 10px; height: 10px; border-radius: 2px;
+                     margin: 0 4px -1px 0; background: var(--zand);}
+  .dagbalk-uitleg i.p {background: var(--piek);}
+
+  /* Uitkomst: het antwoord van de tool, groot en als eerste. */
+  .uitkomst {padding: 20px 24px; border-radius: 8px; background: var(--papier); margin-bottom: 8px;
+             box-shadow: 0 0 0 1px var(--lijn), 0 1px 2px rgba(23,27,37,.05),
+                         0 4px 12px rgba(23,27,37,.04);}
+  .uitkomst-label {font-size: .72rem; font-weight: 600; letter-spacing: .06em;
+                   text-transform: uppercase; color: var(--inkt-zacht);}
+  .uitkomst-waarde {font-size: 2.75rem; font-weight: 700; line-height: 1.1; color: var(--inkt);
+                    letter-spacing: -0.02em; font-variant-numeric: tabular-nums; margin-top: 4px;}
+  .uitkomst-waarde small {font-size: 1rem; font-weight: 500; color: var(--inkt-zacht);
+                          letter-spacing: 0; margin-left: 6px;}
+  .uitkomst-rij {display: flex; flex-wrap: wrap; gap: 8px 32px; margin-top: 16px; padding-top: 16px;
+                 border-top: 1px solid var(--lijn); font-size: .9rem; color: var(--inkt-zacht);}
+  .uitkomst-rij b {color: var(--inkt); font-weight: 600; font-variant-numeric: tabular-nums;}
+  .uitkomst-rij i {display: inline-block; width: 10px; height: 10px; border-radius: 2px;
+                   margin: 0 6px -1px 0; background: var(--zand);}
+  .uitkomst-rij i.p {background: var(--piek);}
 </style>
 """, unsafe_allow_html=True)
+
+
+def stappenbalk(stap: int) -> None:
+    delen = []
+    for i, naam in enumerate(STAPPEN, start=1):
+        klasse = "nu" if i == stap else ("klaar" if i < stap else "")
+        delen.append(f'<div class="{klasse}"><b>Stap {i}</b>{naam}</div>')
+    st.markdown(f'<div class="stappen">{"".join(delen)}</div>', unsafe_allow_html=True)
+
+
+def dagbalk(peak_start: int, peak_end: int, weekdays_only: bool) -> None:
+    """Toont welke kwartieren van een dag als piek tellen."""
+    cellen = "".join(f'<span class="{"p" if peak_start <= q // 4 < peak_end else ""}"></span>'
+                     for q in range(96))
+    uren = "".join(f"<span>{u:02d}:00</span>" for u in (0, 6, 12, 18)) + "<span>24:00</span>"
+    dagen = ("ma–vr; zaterdag en zondag zijn volledig dal" if weekdays_only
+             else "elke dag van de week")
+    st.markdown(
+        f'<div class="dagbalk">{cellen}</div><div class="dagbalk-uren">{uren}</div>'
+        f'<div class="dagbalk-uitleg"><i class="p"></i>piek {peak_start:02d}:00 t.e.m. '
+        f'{peak_end - 1:02d}:45 ({peak_end - peak_start} uur), {dagen} &nbsp; '
+        f'<i></i>dal: al de rest</div>', unsafe_allow_html=True)
 
 
 # --------------------------------------------------------------------------
@@ -102,49 +197,163 @@ def to_numeric(series: pd.Series) -> pd.Series:
     return pd.to_numeric(s.str.replace(",", ".", regex=False), errors="coerce")
 
 
+def _parse_datetime(series: pd.Series) -> pd.Series:
+    # ISO (2026-09-01) eerst: met dayfirst=True zou dat 9 januari worden.
+    ts = pd.to_datetime(series, errors="coerce", format="ISO8601")
+    if ts.notna().mean() > 0.5 and not pd.api.types.is_datetime64_dtype(ts):
+        # Tijdzone-offsets (+02:00 / +01:00 rond de zomeruurwissel): omzetten
+        # naar Belgische lokale tijd zonder zone, net als de Belpex-prijzen.
+        ts = (pd.to_datetime(series, errors="coerce", format="ISO8601", utc=True)
+              .dt.tz_convert("Europe/Brussels").dt.tz_localize(None))
+    if ts.isna().mean() > 0.5:
+        ts = pd.to_datetime(series, errors="coerce", dayfirst=True)
+    if ts.isna().mean() > 0.5:
+        ts = pd.to_datetime(series, errors="coerce", dayfirst=False)
+    return ts
+
+
+_DATUM_PATROON = r"\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}"   # 1/09/2026, 2026-09-01, 01.09.26
+_UUR_PATROON = r"^\s*\d{1,2}[:uh]\d{2}"                # 00:15, 00u15, 0h15
+
+
+def _kies_kolommen(df: pd.DataFrame, value_keywords) -> tuple[str, str]:
+    """
+    Kies tijdstempel- en waardekolom op basis van de INHOUD, niet enkel de naam.
+    Exports verschillen sterk (Fluvius 'From;To;TimeFrame;Value;Unit', Elexys,
+    eigen Excel-lijsten...): een kolom heet bv. 'TimeFrame' maar bevat
+    'Total hours'. Daarom: tijdkolom = eerste kolom waarvan de meeste waarden
+    als datum/tijd lezen; waardekolom = numerieke kolom, bij voorkeur met een
+    herkenbare naam. Bij twee tijdkolommen (van/tot) wint de eerste: het begin
+    van het kwartier.
+    """
+    staal = df.head(200)
+
+    def is_tijd(c) -> bool:
+        if pd.api.types.is_datetime64_any_dtype(staal[c]):
+            return True
+        tekst = staal[c].astype(str)
+        return (tekst.str.contains(_DATUM_PATROON).mean() > 0.8
+                and _parse_datetime(tekst).notna().mean() > 0.8)
+
+    def is_getal(c) -> bool:
+        tekst = staal[c].astype(str)
+        return (not tekst.str.contains(_UUR_PATROON).mean() > 0.5
+                and to_numeric(staal[c]).notna().mean() > 0.8)
+
+    tijd_kols = [c for c in df.columns if is_tijd(c)]
+    if not tijd_kols:
+        raise ValueError("Geen kolom met datum/tijd gevonden.")
+    dt_col = tijd_kols[0]
+
+    num_kols = [c for c in df.columns if c not in tijd_kols and is_getal(c)]
+    if not num_kols:
+        raise ValueError("Geen kolom met getallen gevonden.")
+    voorkeur = [c for c in num_kols if any(k in c.lower() for k in value_keywords)]
+    return dt_col, voorkeur[0] if voorkeur else num_kols[-1]
+
+
 def normalise(df: pd.DataFrame, dt_col=None, value_col=None, value_name="price",
               value_keywords=("price", "prijs", "eur", "€", "value", "waarde")) -> pd.DataFrame:
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
 
-    if dt_col is None:
-        for c in df.columns:
-            if any(k in c.lower() for k in ("date", "datum", "time", "tijd", "period", "mtu")):
-                dt_col = c
-                break
-        dt_col = dt_col or df.columns[0]
-    if value_col is None:
-        for c in df.columns:
-            if c != dt_col and any(k in c.lower() for k in value_keywords):
-                value_col = c
-                break
-        value_col = value_col or [c for c in df.columns if c != dt_col][-1]
+    if dt_col is None or value_col is None:
+        auto_dt, auto_val = _kies_kolommen(df, value_keywords)
+        dt_col = dt_col or auto_dt
+        value_col = value_col or auto_val
 
-    ts = pd.to_datetime(df[dt_col], errors="coerce", dayfirst=True)
-    if ts.isna().mean() > 0.5:
-        ts = pd.to_datetime(df[dt_col], errors="coerce", dayfirst=False)
-
-    out = pd.DataFrame({"datetime": ts, value_name: to_numeric(df[value_col])})
+    out = pd.DataFrame({"datetime": _parse_datetime(df[dt_col]),
+                        value_name: to_numeric(df[value_col])})
     out = out.dropna().drop_duplicates("datetime").sort_values("datetime")
-    return out.reset_index(drop=True)
+    out = out.reset_index(drop=True)
+    out.attrs["bron"] = (dt_col, value_col)
+    return out
 
 
-def normalise_verbruik(df: pd.DataFrame, dt_col=None, verbruik_col=None) -> pd.DataFrame:
-    """Zelfde als normalise(), maar zoekt een verbruikskolom i.p.v. een prijskolom."""
-    return normalise(df, dt_col, verbruik_col, value_name="verbruik",
-                     value_keywords=("verbruik", "consumption", "kwh", "energie",
-                                     "energy", "volume", "hoeveelheid", "afname"))
+# Eenheid van verbruik -> factor naar kWh.
+EENHEID_NAAR_KWH = {"kwh": 1.0, "wh": 0.001, "mwh": 1000.0}
+
+
+def normalise_verbruik(df: pd.DataFrame, dt_col=None, verbruik_col=None,
+                       eenheid: str | None = None) -> pd.DataFrame:
+    """
+    Zet eender welk kwartierverbruik om naar één standaardvorm:
+    kolommen `datetime` (begin van het kwartier) en `verbruik` (kWh).
+
+    Bovenop normalise():
+    - rijen met injectie (Fluvius-register 'Injectie ...') vallen weg;
+    - meerdere rijen per kwartier (bv. registers 'Afname Dag' en 'Afname
+      Nacht') worden opgeteld in plaats van op één na weggegooid;
+    - een eenheidskolom met Wh of MWh wordt omgerekend naar kWh, tenzij
+      `eenheid` ("kwh"/"wh"/"mwh") expliciet is opgegeven (manuele keuze).
+    """
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    trefwoorden = ("verbruik", "consumption", "kwh", "energie", "energy", "volume",
+                   "hoeveelheid", "afname", "value", "waarde")
+
+    register_col = next((c for c in df.columns if any(k in c.lower() for k in
+                         ("register", "richting", "direction", "type"))), None)
+    if register_col is not None:
+        df = df[~df[register_col].astype(str).str.lower().str.contains("injec")]
+
+    if dt_col is None or verbruik_col is None:
+        auto_dt, auto_val = _kies_kolommen(df, trefwoorden)
+        dt_col = dt_col or auto_dt
+        verbruik_col = verbruik_col or auto_val
+
+    waarde = to_numeric(df[verbruik_col])
+    eenheid_col = next((c for c in df.columns if c.lower() in ("unit", "eenheid")), None)
+    if eenheid is not None:
+        waarde = waarde * EENHEID_NAAR_KWH[eenheid]
+    elif eenheid_col is not None:
+        factor = df[eenheid_col].astype(str).str.strip().str.lower().map(EENHEID_NAAR_KWH)
+        waarde = waarde * factor.fillna(1.0)
+
+    out = pd.DataFrame({"datetime": _parse_datetime(df[dt_col]), "verbruik": waarde}).dropna()
+    out = (out.groupby("datetime", as_index=False)["verbruik"].sum()
+           .sort_values("datetime").reset_index(drop=True))
+    out.attrs["bron"] = (dt_col, verbruik_col)
+    return out
+
+
+def verbruik_melding(vbr: pd.DataFrame, d: pd.DataFrame) -> tuple[str, str]:
+    """(niveau, tekst) die toont wat er uit het verbruiksbestand gelezen werd."""
+    tijd_kol, waarde_kol = vbr.attrs.get("bron", ("?", "?"))
+    stap_min = vbr["datetime"].diff().median().total_seconds() / 60
+    if tijd_kol == "_datetime":
+        tijd_kol = "datum + uur"
+    tekst = (f"Herkend: tijdstip uit kolom **{tijd_kol}**, verbruik uit "
+             f"kolom **{waarde_kol}** — {nl(len(vbr))} rijen, "
+             f"{vbr['datetime'].min():%d/%m/%Y} t/m {vbr['datetime'].max():%d/%m/%Y}, "
+             f"totaal {nl(vbr['verbruik'].sum())} kWh.")
+    if len(vbr) > 1 and stap_min != 15:
+        tekst += (f" Let op: de rijen liggen {stap_min:.0f} min uit elkaar, geen kwartier: "
+                  "alleen tijdstippen die exact op een kwartier vallen tellen mee.")
+    gematcht = int(d["datetime"].isin(vbr["datetime"]).sum())
+    if gematcht == 0:
+        return ("warning", tekst + " Maar geen enkele tijdstempel kwam overeen met de "
+                "kwartieren in de gekozen periode — alle verbruik staat op 0. "
+                "Klopt de periode op stap 1, of de gekozen kolommen hieronder?")
+    if gematcht == len(d):
+        return ("success", tekst + f" Alle {nl(gematcht)} kwartieren van de periode gematcht.")
+    return ("success", tekst + f" {nl(gematcht)} van de {nl(len(d))} kwartieren gematcht "
+            f"({gematcht/len(d)*100:.0f}%). De overige kwartieren zonder match kregen verbruik = 0.")
 
 
 @st.cache_data(show_spinner=False)
-def read_upload(content: bytes, name: str) -> pd.DataFrame:
+def read_upload(content: bytes, name: str, overslaan: int = 0,
+                kopregel: bool = True) -> pd.DataFrame:
+    """Lees CSV/Excel. `overslaan` = lijnen boven de tabel; zonder kopregel krijgen
+    de kolommen een nummer."""
     buf = io.BytesIO(content)
+    header = 0 if kopregel else None
     if name.lower().endswith((".xlsx", ".xls", ".xlsm")):
-        return pd.read_excel(buf)
+        return pd.read_excel(buf, skiprows=overslaan, header=header)
     for sep in (";", ",", "\t", "|"):
         buf.seek(0)
         try:
-            trial = pd.read_csv(buf, sep=sep, engine="python")
+            trial = pd.read_csv(buf, sep=sep, engine="python", skiprows=overslaan, header=header)
             if trial.shape[1] >= 2:
                 return trial
         except Exception:
@@ -172,6 +381,7 @@ def _combineer_datum_tijd(df: pd.DataFrame) -> pd.DataFrame:
                 .str.replace("h", ":", regex=False)
                 .str.strip())
         df["_datetime"] = df[datum_col].astype(str).str.strip() + " " + tijd
+        df.attrs["datum_tijd"] = (datum_col, tijd_col)
     return df
 
 
@@ -401,7 +611,7 @@ def piek_omschrijving(peak_start: int, peak_end: int, weekdays_only: bool) -> st
 def style_fig(fig, height=430, title=None):
     fig.update_layout(
         height=height, title=title, margin=dict(l=10, r=10, t=50, b=10),
-        hovermode="x unified", plot_bgcolor="white",
+        hovermode="x unified", plot_bgcolor="white", separators=",.",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
     )
     fig.update_xaxes(showgrid=True, gridcolor="#eee")
@@ -444,104 +654,124 @@ st.session_state.setdefault("stap", 1)
 st.session_state["stap"] = max(1, min(len(STAPPEN), st.session_state["stap"]))
 stap = st.session_state["stap"]
 
-st.title("⚡ Scholt — Belpex kwartierprijzen")
+st.title("Scholt — Belpex kwartierprijzen")
+stappenbalk(stap)
 
 # --------------------------------------------------------------------------
 # STAP 1 — DATA & PERIODE
 # --------------------------------------------------------------------------
 if stap == 1:
-    st.write("Laad eerst je prijsdata. Kies één van de twee manieren hieronder.")
-
-    kol1, kol2 = st.columns(2)
-    with kol1:
-        st.markdown("**Optie A — marktprijzen automatisch ophalen**")
-        vandaag = date.today()
-        # Standaard het lopende jaar: oudere kwartieren zitten al in de databank
-        # en opnieuw ophalen kost alleen tijd. Verder terug mag nog altijd —
-        # tot KWARTIER_START, want eerder bestaan er geen kwartierprijzen.
-        jaarbegin = max(KWARTIER_START, date(vandaag.year, 1, 1))
-        fv = st.date_input("Van", value=jaarbegin, min_value=KWARTIER_START,
-                           max_value=vandaag, key="fetch_van")
-        ft = st.date_input("Tot", value=vandaag, min_value=KWARTIER_START,
-                           max_value=vandaag, key="fetch_tot")
-        st.caption(f"Standaard wordt {vandaag.year} opgehaald en samengevoegd met wat er "
-                   f"al in de databank zit. Zet 'Van' vroeger om verder terug te gaan — "
-                   f"tot {KWARTIER_START:%d/%m/%Y}, want eerder bestaan er geen "
-                   f"kwartierprijzen, enkel uurprijzen.")
-        if st.button("⚡ Marktprijzen ophalen", type="primary", width="stretch"):
-            try:
-                jaren = [jv.year for jv, _ in jaar_stukken(fv, ft)]
-                with st.spinner(f"Ophalen {', '.join(str(j) for j in jaren)} ..."):
-                    gehaald, problemen = fetch_web(fv, ft)
-                save_store(gehaald)
-                per_jaar = gehaald["datetime"].dt.year.value_counts().sort_index()
-                detail = " · ".join(f"{j}: {n:,}" for j, n in per_jaar.items())
-                st.success(f"{len(gehaald):,} kwartieren opgehaald en bewaard ({detail}).")
-                for pr in problemen:
-                    st.warning(f"Niet opgehaald — {pr}")
-                st.rerun()
-            except Exception as e:
-                st.warning(f"Ophalen lukte niet: {e}")
-                st.caption("Download de prijzen dan handmatig en upload ze rechts.")
-    with kol2:
-        st.markdown("**Optie B — zelf een prijsbestand uploaden**")
-        ups = st.file_uploader("Prijsbestand(en) — CSV of Excel",
-                               type=["csv", "xlsx", "xls", "txt"],
-                               accept_multiple_files=True, key="prijs_upload")
-        with st.expander("Kolommen (enkel bij detectieproblemen)"):
-            dt_pick = st.text_input("Naam datum/tijd-kolom", "", placeholder="automatisch")
-            pr_pick = st.text_input("Naam prijskolom", "", placeholder="automatisch")
-
-        parsed = pd.DataFrame(columns=["datetime", "price"])
-        if ups:
-            frames, problems = [], []
-            for f in ups:
-                try:
-                    frames.append(normalise(read_upload(f.getvalue(), f.name),
-                                            dt_pick or None, pr_pick or None))
-                except Exception as e:
-                    problems.append(f"{f.name}: {e}")
-            for msg in problems:
-                st.error(msg)
-            if frames:
-                parsed = pd.concat(frames, ignore_index=True).drop_duplicates("datetime")
-                st.success(f"{len(parsed):,} kwartieren ingelezen uit {len(frames)} bestand(en)")
-                if st.button("➕ Toevoegen aan prijzendatabank", width="stretch"):
-                    save_store(parsed)
-                    st.success("Toegevoegd.")
-                    st.rerun()
-
+    # Meestal staat de databank al klaar: dan gaat het op deze stap enkel om de
+    # periode en de piekuren. Prijzen ophalen of uploaden is onderhoud en zit
+    # ingeklapt; bij een lege databank staat het open.
     store = load_store()
-    st.divider()
-    bron = st.radio(
-        "Welke data wil je gebruiken?",
-        ["Databank (opgehaald/geüpload, YTD)", "Enkel de upload hierboven", "Demodata (voorbeeld)"],
-        index=0 if not store.empty else (1 if ups else 2), horizontal=True)
-
-    if bron.startswith("Databank"):
-        if store.empty:
-            st.info("De databank is nog leeg. Gebruik optie A of B hierboven.")
-            raw, source = pd.DataFrame(columns=["datetime", "price"]), ""
-        else:
-            raw, source = store, f"databank ({STORE.name})"
-    elif bron.startswith("Enkel"):
-        if parsed.empty:
-            st.info("Upload eerst een bestand hierboven (optie B).")
-            raw, source = pd.DataFrame(columns=["datetime", "price"]), ""
-        else:
-            raw, source = parsed, ", ".join(f.name for f in ups)
+    if store.empty:
+        st.write("De prijzendatabank is nog leeg. Haal eerst de marktprijzen op of upload "
+                 "een prijsbestand.")
     else:
-        raw, source = demo_data(), "demodata (gesimuleerd)"
+        st.write(f"De databank bevat Belpex-kwartierprijzen van "
+                 f"{store['datetime'].min():%d/%m/%Y} t/m {store['datetime'].max():%d/%m/%Y}. "
+                 "Kies de periode en de piekuren voor deze klant.")
 
-    if not store.empty:
-        st.caption(f"Databank: {len(store):,} kwartieren · "
-                  f"{store['datetime'].min():%d/%m/%Y} → {store['datetime'].max():%d/%m/%Y}")
-        with st.expander("Databank beheren"):
-            st.download_button("Databank downloaden (CSV)",
-                               store.to_csv(index=False).encode(),
-                               "belpex_databank.csv", "text/csv", width="stretch")
-            if st.button("🗑 Databank wissen", width="stretch"):
+    with st.expander("Prijzen bijwerken of zelf een prijsbestand gebruiken",
+                     icon=":material/database:", expanded=store.empty):
+        kol1, kol2 = st.columns(2)
+        with kol1:
+            st.markdown("**Optie A — marktprijzen automatisch ophalen**")
+            vandaag = date.today()
+            # Standaard het lopende jaar: oudere kwartieren zitten al in de databank
+            # en opnieuw ophalen kost alleen tijd. Verder terug mag nog altijd —
+            # tot KWARTIER_START, want eerder bestaan er geen kwartierprijzen.
+            jaarbegin = max(KWARTIER_START, date(vandaag.year, 1, 1))
+            fv = st.date_input("Van", value=jaarbegin, min_value=KWARTIER_START,
+                               max_value=vandaag, key="fetch_van")
+            ft = st.date_input("Tot", value=vandaag, min_value=KWARTIER_START,
+                               max_value=vandaag, key="fetch_tot")
+            st.caption(f"Standaard wordt {vandaag.year} opgehaald en samengevoegd met wat er "
+                       f"al in de databank zit. Zet 'Van' vroeger om verder terug te gaan — "
+                       f"tot {KWARTIER_START:%d/%m/%Y}, want eerder bestaan er geen "
+                       f"kwartierprijzen, enkel uurprijzen.")
+            if st.button("Marktprijzen ophalen", icon=":material/download:", width="stretch"):
+                try:
+                    jaren = [jv.year for jv, _ in jaar_stukken(fv, ft)]
+                    with st.spinner(f"Ophalen {', '.join(str(j) for j in jaren)} ..."):
+                        gehaald, problemen = fetch_web(fv, ft)
+                    save_store(gehaald)
+                    per_jaar = gehaald["datetime"].dt.year.value_counts().sort_index()
+                    detail = " · ".join(f"{j}: {nl(n)}" for j, n in per_jaar.items())
+                    st.success(f"{nl(len(gehaald))} kwartieren opgehaald en bewaard ({detail}).")
+                    for pr in problemen:
+                        st.warning(f"Niet opgehaald — {pr}")
+                    st.rerun()
+                except Exception as e:
+                    st.warning(f"Ophalen lukte niet: {e}")
+                    st.caption("Download de prijzen dan handmatig en upload ze rechts.")
+        with kol2:
+            st.markdown("**Optie B — zelf een prijsbestand uploaden**")
+            ups = st.file_uploader("Prijsbestand(en) — CSV of Excel",
+                                   type=["csv", "xlsx", "xls", "txt"],
+                                   accept_multiple_files=True, key="prijs_upload")
+            kp1, kp2 = st.columns(2)
+            dt_pick = kp1.text_input("Datum/tijd-kolom", "", placeholder="automatisch",
+                                     help="Enkel invullen als de kolom niet herkend wordt.")
+            pr_pick = kp2.text_input("Prijskolom", "", placeholder="automatisch",
+                                     help="Enkel invullen als de kolom niet herkend wordt.")
+
+            parsed = pd.DataFrame(columns=["datetime", "price"])
+            if ups:
+                frames, problems = [], []
+                for f in ups:
+                    try:
+                        frames.append(normalise(read_upload(f.getvalue(), f.name),
+                                                dt_pick or None, pr_pick or None))
+                    except Exception as e:
+                        problems.append(f"{f.name}: {e}")
+                for msg in problems:
+                    st.error(msg)
+                if frames:
+                    parsed = pd.concat(frames, ignore_index=True).drop_duplicates("datetime")
+                    st.success(f"{nl(len(parsed))} kwartieren ingelezen uit {len(frames)} bestand(en)")
+                    if st.button("Toevoegen aan prijzendatabank", icon=":material/add:",
+                                 width="stretch"):
+                        save_store(parsed)
+                        st.success("Toegevoegd.")
+                        st.rerun()
+
+        store = load_store()
+        st.divider()
+        bron = st.radio(
+            "Welke data wil je gebruiken?",
+            ["Databank", "Enkel de upload hierboven", "Demodata (voorbeeld)"],
+            index=0 if not store.empty else (1 if ups else 2), horizontal=True)
+
+        if bron.startswith("Databank"):
+            if store.empty:
+                st.info("De databank is nog leeg. Gebruik optie A of B hierboven.")
+                raw, source = pd.DataFrame(columns=["datetime", "price"]), ""
+            else:
+                raw, source = store, f"databank ({STORE.name})"
+        elif bron.startswith("Enkel"):
+            if parsed.empty:
+                st.info("Upload eerst een bestand hierboven (optie B).")
+                raw, source = pd.DataFrame(columns=["datetime", "price"]), ""
+            else:
+                raw, source = parsed, ", ".join(f.name for f in ups)
+        else:
+            raw, source = demo_data(), "demodata (gesimuleerd)"
+
+        if not store.empty:
+            st.caption(f"Databank: {nl(len(store))} kwartieren · "
+                      f"{store['datetime'].min():%d/%m/%Y} → {store['datetime'].max():%d/%m/%Y}")
+            db1, db2 = st.columns(2)
+            db1.download_button("Databank downloaden (CSV)", store.to_csv(index=False).encode(),
+                                "belpex_databank.csv", "text/csv",
+                                icon=":material/download:", width="stretch")
+            # Wissen is niet ongedaan te maken: eerst bewust aanvinken.
+            zeker = db2.checkbox("Ik wil alle prijzen in de databank wissen", key="wis_zeker")
+            if db2.button("Databank wissen", icon=":material/delete:", width="stretch",
+                          disabled=not zeker):
                 STORE.unlink(missing_ok=True)
+                st.session_state["wis_zeker"] = False
                 st.rerun()
 
     if not raw.empty:
@@ -550,7 +780,7 @@ if stap == 1:
         lo, hi = raw["datetime"].min().date(), raw["datetime"].max().date()
         jaren = sorted(raw["datetime"].dt.year.unique())
         keuzes = ["Volledig", "Laatste 30 dagen", "Laatste 90 dagen",
-                  "Year to date", "Per jaar", "Zelf kiezen"]
+                  "Dit jaar", "Per jaar", "Zelf kiezen"]
         # Bij data uit meerdere jaren is "volledig" de zinnigste standaard;
         # bij één jaar blijft dat year-to-date.
         preset = st.radio("Snelkeuze", keuzes,
@@ -559,7 +789,7 @@ if stap == 1:
             d0, d1 = max(lo, hi - pd.Timedelta(days=29).to_pytimedelta()), hi
         elif preset == "Laatste 90 dagen":
             d0, d1 = max(lo, hi - pd.Timedelta(days=89).to_pytimedelta()), hi
-        elif preset == "Year to date":
+        elif preset == "Dit jaar":
             d0, d1 = max(lo, date(hi.year, 1, 1)), hi
         elif preset == "Per jaar":
             jaar = st.selectbox("Jaar", jaren, index=len(jaren) - 1)
@@ -593,8 +823,7 @@ if stap == 1:
                                         key="w_weekdays_only")
         with pk2:
             eenheid = st.radio("Eenheid (prijs)", list(EENHEDEN), key="w_eenheid")
-        st.caption(f"Piek = {piek_omschrijving(peak_start, peak_end, weekdays_only)}  ·  "
-                   f"dal = al de rest.")
+        dagbalk(peak_start, peak_end, weekdays_only)
 
         cache["piekprofiel"] = piekprofiel
         cache["peak_uren"] = (peak_start, peak_end)
@@ -659,110 +888,106 @@ if data_geladen:
 
 blokkade = None
 if stap == 1 and not data_geladen:
-    blokkade = "Laad eerst prijsdata (en een geldige periode) voor je verder kan."
+    blokkade = "Laad eerst prijsdata en kies een periode voor je verder kan."
 elif stap == 2 and not heeft_verbruik:
-    blokkade = "Upload je verbruik hieronder voor je verder kan."
+    blokkade = "Upload eerst het verbruik (bovenaan deze stap) voor je verder kan."
 elif stap == 2 and not vergoeding_bevestigd:
-    blokkade = "Vul je vergoeding in, of vink 'geen vergoeding' aan, voor je verder kan."
+    blokkade = "Vul de vergoeding in, of vink 'geen aparte leveringsvergoeding' aan."
 
-st.divider()
-nav = st.columns([1, 3, 1])
-with nav[0]:
-    if st.button("◀ Vorige", disabled=(stap == 1), width="stretch"):
-        st.session_state["stap"] -= 1
-        st.rerun()
-with nav[1]:
-    st.progress((stap - 1) / (len(STAPPEN) - 1))
-    st.caption(f"**Stap {stap} van {len(STAPPEN)}: {STAPPEN[stap - 1]}**")
-with nav[2]:
-    if st.button("Volgende ▶", disabled=(stap == len(STAPPEN) or blokkade is not None), width="stretch"):
-        st.session_state["stap"] += 1
-        st.rerun()
-if blokkade:
-    st.warning(f"⚠️ {blokkade}")
 
-st.divider()
+def navigatie() -> None:
+    """Vorige/Volgende, altijd onderaan de stap: eerst invullen, dan verder."""
+    st.divider()
+    if blokkade:
+        st.warning(blokkade, icon=":material/info:")
+    links, _, rechts = st.columns([1, 3, 1])
+    with links:
+        if st.button("Vorige", icon=":material/arrow_back:", disabled=(stap == 1),
+                     width="stretch"):
+            st.session_state["stap"] -= 1
+            st.rerun()
+    with rechts:
+        if stap < len(STAPPEN) and st.button(
+                "Volgende", icon=":material/arrow_forward:",
+                icon_position="right", type="primary", disabled=blokkade is not None,
+                width="stretch"):
+            st.session_state["stap"] += 1
+            st.rerun()
+
 
 if not data_geladen:
     if stap != 1:
-        st.info("⬅️ Ga naar stap 1 en laad eerst prijsdata.")
+        st.info("Ga naar stap 1 en laad eerst prijsdata.")
+    navigatie()
     st.stop()
 
-# --------------------------------------------------------------------------
-# HEADER (stap 2 t.e.m. 4)
-# --------------------------------------------------------------------------
-
 if stap > 1:
-    st.caption(f"Bron: {source}  ·  {d['datetime'].min():%d/%m/%Y} t/m {d['datetime'].max():%d/%m/%Y}"
-              f"  ·  {len(d):,} kwartieren"
-              f"  ·  piek {piek_omschrijving(peak_start, peak_end, weekdays_only)}"
-              f"  ·  eenheid {eenheid}")
-
-    p = d["price"]
-    peak_avg = d.loc[d["is_peak"], "price"].mean()
-    off_avg = d.loc[~d["is_peak"], "price"].mean()
-    daily = d.groupby("date")["price"]
-
-    c = st.columns(6)
-    c[0].metric("Baseload", f"{p.mean()*factor:.{dec}f}", help=eenheid)
-    c[1].metric("Peak", f"{peak_avg*factor:.{dec}f}" if pd.notna(peak_avg) else "—",
-                f"{(peak_avg/p.mean()-1)*100:+.1f}% vs base" if pd.notna(peak_avg) and p.mean() else None)
-    c[2].metric("Off-peak", f"{off_avg*factor:.{dec}f}" if pd.notna(off_avg) else "—")
-    c[3].metric("Volatiliteit (σ)", f"{p.std()*factor:.{dec}f}")
-    c[4].metric("Negatieve kwartieren", f"{d['is_negative'].mean()*100:.1f}%",
-                f"{int(d['is_negative'].sum()):,} stuks", delta_color="off")
-    c[5].metric("Gem. dagspread", f"{(daily.max()-daily.min()).mean()*factor:.{dec}f}")
-    st.divider()
+    st.caption(f"Prijzen: {source} · {d['datetime'].min():%d/%m/%Y} t/m "
+               f"{d['datetime'].max():%d/%m/%Y} · {nl(len(d))} kwartieren · "
+               f"piek {piek_omschrijving(peak_start, peak_end, weekdays_only)}")
 
 # ============================================================================
 # ============================================================================
 # STAP 2 — VERBRUIK & VERGOEDING
 # ============================================================================
 if stap == 2:
-    st.markdown(f"""
-Upload je kwartierverbruik en vul je leveringsvergoeding in — de eenheidsprijs
-(totaal, piek, dal) wordt dan meteen berekend.
+    st.write("Upload het kwartierverbruik van de klant en vul de leveringsvergoeding in. "
+             "De eenheidsprijs verschijnt meteen hieronder.")
 
-**Piek** = {piek_omschrijving(peak_start, peak_end, weekdays_only)} · **Dal** = al de rest.
-Pas je de verhouding aan op stap 1, dan volgen deze cijfers en de werkmap mee.
-Eenheidsprijs = totale kost / totaal verbruik (verbruiksgewogen). Kost per kwartier
-= (prijs + vergoeding) × verbruik.
-""")
-
-    v1, v2 = st.columns(2)
+    v1, v2 = st.columns(2, gap="large")
     with v1:
         nieuw_bestand = st.file_uploader(
-            "📤 Verbruik uploaden (CSV of Excel, met datum/tijd + verbruik in kWh)",
-            type=["csv", "xlsx", "xls", "txt"], key="verbruik_upload")
-        if nieuw_bestand is not None and nieuw_bestand.name != vbr_naam:
+            "Verbruik per kwartier (CSV of Excel)",
+            type=["csv", "xlsx", "xls", "txt"], key="verbruik_upload",
+            help="Eén lijn per kwartier, met een datum/tijd en een verbruik. "
+                 "Kolomnamen en notatie maken niet uit; de tool zoekt ze zelf.")
+        # Onthoud het laatst geprobeerde bestand (ook bij een fout), anders wordt
+        # een onleesbaar bestand bij elke rerun opnieuw geprobeerd.
+        if nieuw_bestand is not None and nieuw_bestand.name != cache.get("vbr_poging"):
+            cache["vbr_poging"] = nieuw_bestand.name
+            # De ruwe bytes blijven bewaard voor de manuele kolomkeuze hieronder.
+            cache["vbr_bytes"] = nieuw_bestand.getvalue()
             try:
-                ruw = _combineer_datum_tijd(read_upload(nieuw_bestand.getvalue(), nieuw_bestand.name))
+                ruw = _combineer_datum_tijd(read_upload(cache["vbr_bytes"], nieuw_bestand.name))
                 vbr = normalise_verbruik(ruw, dt_col="_datetime" if "_datetime" in ruw.columns else None)
-                if vbr["datetime"].duplicated().any():
-                    vbr = vbr.drop_duplicates("datetime", keep="last")
+                if vbr.empty:
+                    raise ValueError("geen enkele rij met een geldige datum/tijd en verbruik.")
                 cache["vbr_df"] = vbr
                 cache["vbr_naam"] = nieuw_bestand.name
-                gematcht = int(d["datetime"].isin(vbr["datetime"]).sum())
-                if gematcht == 0:
-                    cache["vbr_melding"] = ("warning", "Geen enkele tijdstempel uit het "
-                                            "verbruiksbestand kwam overeen met de kwartieren in "
-                                            "de gekozen periode — alle verbruik staat op 0.")
-                elif gematcht == len(d):
-                    cache["vbr_melding"] = ("success", f"Alle {gematcht:,} kwartieren gematcht "
-                                            "met verbruiksdata.")
-                else:
-                    cache["vbr_melding"] = ("success", f"{gematcht:,} van de {len(d):,} "
-                                            f"kwartieren gematcht ({gematcht/len(d)*100:.0f}%). "
-                                            "De overige kwartieren zonder match kregen verbruik = 0.")
-                st.rerun()
+                cache["vbr_melding"] = verbruik_melding(vbr, d)
+                cache["vbr_manueel_open"] = False
+                # Wat automatisch herkend werd, als startwaarde voor de manuele keuze.
+                tijd_kol, waarde_kol = vbr.attrs["bron"]
+                uur_kol = None
+                if tijd_kol == "_datetime":
+                    tijd_kol, uur_kol = ruw.attrs["datum_tijd"]
+                eenheid_col = next((c for c in ruw.columns
+                                    if str(c).lower() in ("unit", "eenheid")), None)
+                eenheid = "kWh"
+                if eenheid_col is not None:
+                    meest = ruw[eenheid_col].astype(str).str.strip().str.lower().mode()
+                    eenheid = {"wh": "Wh", "mwh": "MWh"}.get(meest.iloc[0] if len(meest) else "", "kWh")
+                cache["vbr_auto"] = {"tijd": tijd_kol, "uur": uur_kol,
+                                     "waarde": waarde_kol, "eenheid": eenheid}
             except Exception as e:
-                cache["vbr_melding"] = ("error", f"Kon het verbruiksbestand niet inlezen: {e}")
-                st.rerun()
+                cache["vbr_melding"] = ("error", f"Kon **{nieuw_bestand.name}** niet automatisch "
+                                        f"inlezen: {e} Kies hieronder zelf de kolommen.")
+                cache["vbr_manueel_open"] = True
+                cache["vbr_auto"] = {}
+            st.rerun()
         if vbr_naam:
             st.caption(f"Actief bestand: **{vbr_naam}**")
-            if vbr_melding:
-                niveau, tekst = vbr_melding
-                getattr(st, niveau)(tekst)
+        if vbr_melding:
+            niveau, tekst = vbr_melding
+            getattr(st, niveau)(tekst)
+        if vbr_df is not None:
+            standaard = vbr_df.rename(columns={"verbruik": "verbruik_kwh"})
+            st.download_button(
+                "Gestandaardiseerd verbruik (CSV)",
+                standaard.to_csv(index=False, sep=";", decimal=",",
+                                 date_format="%Y-%m-%d %H:%M").encode("utf-8-sig"),
+                file_name="verbruik_standaard.csv", mime="text/csv",
+                icon=":material/download:")
     with v2:
         st.session_state.setdefault("vergoeding_input", vergoeding_in)
         st.session_state.setdefault("w_geen_vergoeding", geen_vergoeding)
@@ -774,60 +999,169 @@ Eenheidsprijs = totale kost / totaal verbruik (verbruiksgewogen). Kost per kwart
         cache["vergoeding"] = vergoeding_in
         cache["geen_vergoeding"] = geen_vergoeding
         if not (geen_vergoeding or vergoeding_in > 0):
-            st.caption("👆 Vul een bedrag in, of vink het vakje aan.")
+            st.caption("Vul een bedrag in, of vink het vakje aan.")
+
+    # --- Manuele kolomkeuze: terugval als de automatische herkenning faalt of
+    # de verkeerde kolom pakt. Werkt op de bewaarde bytes van de laatste upload.
+    vbr_bytes = cache.get("vbr_bytes")
+    poging = cache.get("vbr_poging")
+    if vbr_bytes is not None:
+        with st.expander("Kolommen controleren of zelf kiezen", icon=":material/tune:",
+                         expanded=cache.get("vbr_manueel_open", False)):
+            st.caption("Vooraf ingevuld met wat automatisch herkend werd. Pas aan wat niet "
+                       "klopt en klik op **Toepassen**.")
+            m1, m2 = st.columns(2)
+            overslaan = m1.number_input("Lijnen overslaan bovenaan (tekst boven de tabel)",
+                                        0, 100, 0, key=f"m_skip_{poging}")
+            kopregel = m2.checkbox("Eerste lijn bevat kolomnamen", True, key=f"m_kop_{poging}")
+            try:
+                tabel = read_upload(vbr_bytes, poging, int(overslaan), kopregel)
+                tabel.columns = [str(c).strip() for c in tabel.columns]
+            except Exception as e:
+                st.error(f"Kon de tabel niet lezen met deze instellingen: {e}")
+                tabel = None
+
+            if tabel is not None:
+                st.caption("Eerste lijnen zoals ingelezen:")
+                st.dataframe(tabel.head(5), hide_index=True)
+                kols = list(tabel.columns)
+                geen = "— geen (datum en uur zitten samen) —"
+                auto = cache.get("vbr_auto") or {}
+
+                def _index(opties, waarde, standaard):
+                    return opties.index(waarde) if waarde in opties else standaard
+
+                eenheden = ["kWh", "Wh", "MWh"]
+                c1, c2, c3, c4 = st.columns(4)
+                tijd_kol = c1.selectbox("Datum/tijd (begin kwartier)", kols,
+                                        index=_index(kols, auto.get("tijd"), 0),
+                                        key=f"m_tijd_{poging}")
+                uur_kol = c2.selectbox("Uur apart", [geen] + kols,
+                                       index=_index([geen] + kols, auto.get("uur"), 0),
+                                       key=f"m_uur_{poging}")
+                waarde_kol = c3.selectbox("Verbruik", kols,
+                                          index=_index(kols, auto.get("waarde"), len(kols) - 1),
+                                          key=f"m_waarde_{poging}")
+                eenheid_keuze = c4.selectbox("Eenheid", eenheden,
+                                             index=_index(eenheden, auto.get("eenheid"), 0),
+                                             key=f"m_eenh_{poging}")
+
+                if st.button("Toepassen", type="primary"):
+                    try:
+                        bron = tabel.copy()
+                        if uur_kol != geen:
+                            uur = (bron[uur_kol].astype(str).str.replace("u", ":", regex=False)
+                                   .str.replace("h", ":", regex=False).str.strip())
+                            bron["_datetime"] = bron[tijd_kol].astype(str).str.strip() + " " + uur
+                            dt_kol = "_datetime"
+                        else:
+                            dt_kol = tijd_kol
+                        vbr = normalise_verbruik(bron, dt_col=dt_kol, verbruik_col=waarde_kol,
+                                                 eenheid=eenheid_keuze.lower())
+                        if uur_kol != geen:
+                            vbr.attrs["bron"] = (f"{tijd_kol} + {uur_kol}", waarde_kol)
+                        if vbr.empty:
+                            raise ValueError("met deze kolommen bleef er geen enkele geldige rij "
+                                             "over (datum of getal niet leesbaar).")
+                        cache["vbr_df"] = vbr
+                        cache["vbr_naam"] = poging
+                        cache["vbr_melding"] = verbruik_melding(vbr, d)
+                        cache["vbr_manueel_open"] = False
+                    except Exception as e:
+                        cache["vbr_melding"] = ("error", f"Manuele keuze lukte niet: {e}")
+                        cache["vbr_manueel_open"] = True
+                    st.rerun()
 
     st.divider()
-    k1, k2, k3 = st.columns(3)
-    k1.metric("Kwartieren in de periode", f"{len(d_wb):,}")
-    k2.metric("Waarvan piek", f"{int(piek_vast.sum()):,}" if piek_vast is not None else "—")
-    k3.metric("Waarvan dal", f"{int((~piek_vast).sum()):,}" if piek_vast is not None else "—")
-
     if not heeft_verbruik:
-        st.info("⬆️ Upload je verbruik hierboven om de eenheidsprijs te zien.")
+        st.info("Upload het verbruik hierboven om de eenheidsprijs te zien.")
+    elif ep_totaal is None:
+        st.warning("Er is geen verbruik in de gekozen periode, dus geen eenheidsprijs. "
+                   "Kijk de periode op stap 1 na.")
     else:
-        e1, e2, e3 = st.columns(3)
-        for col, label, ep in ((e1, "Eenheidsprijs totaal", ep_totaal),
-                               (e2, "Eenheidsprijs piek", ep_piek),
-                               (e3, "Eenheidsprijs dal", ep_dal)):
-            col.metric(label, f"{ep*factor:.{dec}f}" if ep is not None else "—", help=eenheid)
+        def _prijs(v):
+            return nl(v * factor, dec) if v is not None else "—"
 
-        g1, g2 = st.columns(2)
+        verbruik_tot = float(vb["verbruik"].sum())
+        verbruik_piek = float(vb.loc[vbr_piek_mask, "verbruik"].sum())
+        kost_tot = kost_piek + kost_dal
+        # De uitkomst eerst en groot: dit is het getal waarvoor de tool bestaat.
+        st.markdown(f"""
+<div class="uitkomst">
+  <div class="uitkomst-label">Eenheidsprijs {d0:%d/%m/%Y} – {d1:%d/%m/%Y}</div>
+  <div class="uitkomst-waarde">{_prijs(ep_totaal)}<small>{eenheid}</small></div>
+  <div class="uitkomst-rij">
+    <span><i class="p"></i>Piek <b>{_prijs(ep_piek)}</b></span>
+    <span><i></i>Dal <b>{_prijs(ep_dal)}</b></span>
+    <span>Verbruik <b>{nl(verbruik_tot)} kWh</b>
+          ({nl(verbruik_piek / verbruik_tot * 100 if verbruik_tot else 0)}% in piek)</span>
+    <span>Kost <b>€ {nl(kost_tot)}</b></span>
+  </div>
+</div>""", unsafe_allow_html=True)
+        st.caption(f"Eenheidsprijs = Σ (Belpex-prijs + vergoeding) × verbruik ÷ Σ verbruik, "
+                   f"over {nl(len(d_wb))} kwartieren ({nl(int(piek_vast.sum()))} piek, "
+                   f"{nl(int((~piek_vast).sum()))} dal).")
+
+        g1, g2 = st.columns(2, gap="large")
         with g1:
             fig = go.Figure(go.Bar(
                 x=["Totaal", "Piek", "Dal"],
                 y=[(v * factor if v is not None else 0) for v in (ep_totaal, ep_piek, ep_dal)],
-                marker_color=[NAVY, ROOD, GREY]))
+                marker_color=[NAVY, ROOD, ZAND], marker_line_color=[NAVY, ROOD, ZAND_RAND],
+                marker_line_width=1))
             fig.update_yaxes(title=eenheid)
-            st.plotly_chart(style_fig(fig, 380, "Eenheidsprijs per periode"), **FULL)
+            st.plotly_chart(style_fig(fig, 340, "Eenheidsprijs per periode"), **FULL)
         with g2:
             fig = go.Figure(go.Pie(labels=["Piek", "Dal"], values=[kost_piek, kost_dal],
-                                   hole=0.5, marker_colors=[ROOD, GREY]))
-            st.plotly_chart(style_fig(fig, 380, "Aandeel kost piek vs dal (EUR)"), **FULL)
+                                   hole=0.55, marker_colors=[ROOD, ZAND], sort=False,
+                                   textinfo="label+percent", showlegend=False,
+                                   marker_line_color="white", marker_line_width=2))
+            st.plotly_chart(style_fig(fig, 340, "Aandeel in de kost (EUR)"), **FULL)
 
 # ============================================================================
 # STAP 3 — EXPORT
 # ============================================================================
-else:
+elif stap == 3:
     st.subheader("Eenheidsprijs-werkmap")
     st.caption("Excel met levende formules — prijs, vergoeding en verbruik staan al ingevuld "
               "op het blad 'Kwartierdata'; 'Overzicht' herrekent zichzelf.")
     fname = f"belpex_eenheidsprijs_{d0:%Y%m%d}_{d1:%Y%m%d}.xlsx"
-    if st.button("📗 Scholt-werkmap aanmaken", type="primary", width="stretch"):
+    if st.button("Scholt-werkmap aanmaken", icon=":material/table_view:", type="primary",
+                 width="stretch"):
         with st.spinner("Werkmap bouwen ..."):
             st.session_state["wb"] = build_workbook(
                 d_wb, peak_start, peak_end, weekdays_only)
             st.session_state["wb_name"] = fname
 
     if st.session_state.get("wb"):
-        st.download_button("⬇️ Werkmap opslaan", st.session_state["wb"],
+        st.download_button("Werkmap opslaan", st.session_state["wb"],
                            st.session_state["wb_name"],
                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                           type="primary", width="stretch")
+                           icon=":material/download:", type="primary", width="stretch")
 
     st.divider()
-    st.subheader("Volledige analyse")
-    st.caption(f"Prijskolommen in de tabellen hieronder staan in {eenheid}; "
-              "'Ruwe data' en de CSV blijven in EUR/kWh voor reproduceerbaarheid.")
+    st.subheader("Marktprijzen in de periode")
+    st.caption(f"Belpex zelf, los van het verbruik van de klant. Prijzen in {eenheid}.")
+    p = d["price"]
+    peak_avg = d.loc[d["is_peak"], "price"].mean()
+    off_avg = d.loc[~d["is_peak"], "price"].mean()
+    daily = d.groupby("date")["price"]
+    c = st.columns(6)
+    c[0].metric("Gemiddeld", nl(p.mean() * factor, dec),
+                help="Baseload: gewoon gemiddelde van alle kwartieren.")
+    c[1].metric("Piek", nl(peak_avg * factor, dec) if pd.notna(peak_avg) else "—",
+                f"{'+' if peak_avg >= p.mean() else ''}{nl((peak_avg / p.mean() - 1) * 100, 1)}%"
+                if pd.notna(peak_avg) and p.mean() else None, delta_color="off")
+    c[2].metric("Dal", nl(off_avg * factor, dec) if pd.notna(off_avg) else "—")
+    c[3].metric("Schommeling (σ)", nl(p.std() * factor, dec),
+                help="Standaardafwijking van de kwartierprijzen.")
+    c[4].metric("Negatieve prijs", f"{nl(d['is_negative'].mean() * 100, 1)}%",
+                f"{nl(int(d['is_negative'].sum()))} kwartieren", delta_color="off")
+    c[5].metric("Gem. dagverschil", nl((daily.max() - daily.min()).mean() * factor, dec),
+                help="Gemiddeld verschil tussen de duurste en goedkoopste kwartier van een dag.")
+
+    st.caption(f"Downloads: prijskolommen in {eenheid}; 'Ruwe data' en de CSV blijven in "
+               "EUR/kWh.")
     mt = monthly_table(d, factor)
     profiles = {
         "Kwartierprofiel": d.groupby("time_label")["price_disp"].agg(["mean", "median", "min", "max", "std"]).round(4),
@@ -845,15 +1179,20 @@ else:
         d[["datetime", "price", "is_peak", "is_negative"]].to_excel(w, sheet_name="Ruwe data", index=False)
 
     x, y = st.columns(2)
-    x.download_button("📊 Excel downloaden", buf.getvalue(),
+    x.download_button("Analyse als Excel", buf.getvalue(),
                       f"belpex_{d0:%Y%m%d}_{d1:%Y%m%d}.xlsx",
                       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                      **FULL)
-    y.download_button("📄 CSV downloaden",
+                      icon=":material/download:", **FULL)
+    y.download_button("Kwartierprijzen als CSV",
                       d[["datetime", "price", "is_peak", "is_negative"]]
                       .to_csv(sep=";", decimal=",", index=False).encode(),
                       f"belpex_{d0:%Y%m%d}_{d1:%Y%m%d}.csv", "text/csv",
-                      **FULL)
+                      icon=":material/download:", **FULL)
 
-    st.dataframe(d[["datetime", "price", "is_peak", "is_negative"]].tail(200),
-                 **FULL, height=400)
+    st.caption("Laatste 200 kwartieren van de periode:")
+    st.dataframe(d[["datetime", "price", "is_peak", "is_negative"]].tail(200)
+                 .rename(columns={"datetime": "Tijdstip", "price": "Prijs (EUR/kWh)",
+                                  "is_peak": "Piek", "is_negative": "Negatief"}),
+                 hide_index=True, **FULL, height=400)
+
+navigatie()

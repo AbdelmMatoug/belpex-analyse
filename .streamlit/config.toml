@@ -4,3 +4,8 @@ primaryColor = "#e61d3a"
 backgroundColor = "#ffffff"
 secondaryBackgroundColor = "#edeae4"
 textColor = "#171b25"
+baseRadius = "6px"
+
+[client]
+# Verbergt de ontwikkelaarsknoppen (Deploy, Rerun...) voor de eindgebruiker.
+toolbarMode = "minimal"
